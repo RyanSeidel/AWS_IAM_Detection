@@ -21,3 +21,9 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+
+# Terraform files
+*.tfstate*
+.terraform/
+*.tfvars
+backend.hcl
