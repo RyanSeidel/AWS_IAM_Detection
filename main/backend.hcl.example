@@ -1,9 +1,0 @@
-# Copy this file to backend.hcl (gitignored — contains the account ID) and
-# fill in the values printed by:
-#
-#   cd bootstrap && terraform output backend_config_snippet
-#
-bucket       = ""
-key          = ""
-region       = ""
-use_lockfile = true
