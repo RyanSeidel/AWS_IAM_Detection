@@ -33,7 +33,7 @@ resource "aws_iam_role_policy" "detector" {
       },
       {
         Effect   = "Allow"
-        Action   = ["dynamodb:GetItem", "dynamodb:Query"]
+        Action   = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:PutItem"]
         Resource = aws_dynamodb_table.baseline.arn
       },
       {
