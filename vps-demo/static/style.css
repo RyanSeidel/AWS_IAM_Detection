@@ -1,0 +1,4 @@
+body { font-family: sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+table { width: 100%; border-collapse: collapse; margin-bottom: 2rem; }
+th, td { text-align: left; padding: .4rem; border-bottom: 1px solid #ddd; }
+#order-total { font-weight: bold; margin-left: .5rem; }

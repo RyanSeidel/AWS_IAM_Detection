@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Demo Shop</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body>
+  <h1>Demo Shop</h1>
+
+  <h2>Products</h2>
+  <table>
+    <tr><th>SKU</th><th>Name</th><th>Price</th></tr>
+    {% for p in products %}
+    <tr><td>{{ p.sku }}</td><td>{{ p.name }}</td><td>${{ p.price }}</td></tr>
+    {% endfor %}
+  </table>
+
+  <h2>Place an order</h2>
+  <form id="order-form" method="post" action="/order">
+    <input name="customer" placeholder="Your name" required>
+    <select name="sku">
+      {% for p in products %}<option value="{{ p.sku }}" data-price="{{ p.price }}">{{ p.name }}</option>{% endfor %}
+    </select>
+    <input name="qty" type="number" min="1" value="1" required>
+    <button>Buy</button>
+    <span id="order-total"></span>
+  </form>
+
+  <h2>Recent orders</h2>
+  <table>
+    <tr><th>Time</th><th>Customer</th><th>Item</th><th>Qty</th><th>Total</th></tr>
+    {% for o in orders %}
+    <tr><td>{{ o.created_at }}</td><td>{{ o.customer }}</td><td>{{ o.name }}</td><td>{{ o.qty }}</td><td>${{ o.total }}</td></tr>
+    {% endfor %}
+  </table>
+</body>
+</html>
