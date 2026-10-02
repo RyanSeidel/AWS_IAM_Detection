@@ -1,5 +1,6 @@
 import json
 import datetime
+import ipaddress
 import boto3
 from collections import defaultdict
 
@@ -11,8 +12,8 @@ def seed_real_world_global_baselines():
     dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
     table = dynamodb.Table('insider-threat-baseline')
     
-    # Structure: { identity_arn: { "regions": set(), "hours": set(), "apis": set() } }
-    profiles = defaultdict(lambda: {"regions": set(), "hours": set(), "apis": set()})
+    # Structure: { identity_arn: { "regions": set(), "hours": set(), "apis": set(), "source_ips": set() } }
+    profiles = defaultdict(lambda: {"regions": set(), "hours": set(), "apis": set(), "source_ips": set()})
     
     print(f"Discovered {len(regions)} active regions. Beginning global CloudTrail baseline extraction...")
     
@@ -64,6 +65,13 @@ def seed_real_world_global_baselines():
                     profiles[identity]['apis'].add(api_call)
                     if hour is not None:
                         profiles[identity]['hours'].add(hour)
+
+                    # Only real IPs; service calls put a hostname here instead
+                    try:
+                        ip = str(ipaddress.ip_address(ct_event.get('sourceIPAddress')))
+                        profiles[identity]['source_ips'].add(ip)
+                    except (TypeError, ValueError):
+                        pass
                         
         except Exception as e:
             print(f"  -> Error or access denied fetching logs in {region}: {e}")
@@ -78,7 +86,8 @@ def seed_real_world_global_baselines():
                 "facet": "profile",
                 "regions": list(data["regions"]),
                 "hours": list(data["hours"]),
-                "apis": list(data["apis"])
+                "apis": list(data["apis"]),
+                "source_ips": list(data["source_ips"])
             }
             batch.put_item(Item=item)
             print(f"✅ Baselined identity: {identity}")

@@ -33,7 +33,7 @@ resource "aws_iam_role_policy" "detector" {
       },
       {
         Effect   = "Allow"
-        Action   = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:PutItem"]
+        Action   = ["dynamodb:GetItem", "dynamodb:Query"]
         Resource = aws_dynamodb_table.baseline.arn
       },
       {
@@ -63,20 +63,30 @@ resource "aws_lambda_function" "detector" {
   depends_on = [aws_cloudwatch_log_group.detector]
 }
 
-resource "aws_cloudwatch_event_rule" "risky" {
-  name = "insider-threat-risky-calls"
-
-  event_pattern = jsonencode({
+locals {
+  # Shared by the us-east-1 rule and every regional forwarding rule, so all
+  # regions filter identically before reaching the one detector Lambda.
+  # Matches mutating calls, plus a short list of sensitive reads (secret theft,
+  # and S3 object reads where data events are enabled, e.g. a decoy bucket).
+  risky_event_pattern = jsonencode({
     "detail-type" = ["AWS API Call via CloudTrail"]
     detail = {
-      readOnly    = [false]
       eventSource = [{ "anything-but" = ["logs.amazonaws.com"] }]
       userIdentity = {
         invokedBy = [{ exists = false }]
-        type      = ["IAMUser", "AssumedRole"]
+        type      = ["IAMUser", "AssumedRole", "Root"]
       }
+      "$or" = [
+        { readOnly = [false] },
+        { eventName = ["GetParameter", "GetParameters", "GetSecretValue", "GetObject"] }
+      ]
     }
   })
+}
+
+resource "aws_cloudwatch_event_rule" "risky" {
+  name          = "insider-threat-risky-calls"
+  event_pattern = local.risky_event_pattern
 }
 
 resource "aws_cloudwatch_event_target" "detector" {
