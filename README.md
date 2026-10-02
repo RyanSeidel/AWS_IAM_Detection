@@ -94,6 +94,75 @@ us-east-1:  CloudTrail event ─────────────────
 
 ---
 
+## What the baseline does
+
+The baseline is a **record of each identity's normal behaviour**. Every new
+event is compared against it, so the detector can tell "normal for them" from
+"out of character". `helpers/seed_baseline.py` builds it from the last 90 days
+of CloudTrail history, and the Lambda reads it for every event.
+
+**Example.** The baseline for `admin.me`:
+
+| What | Normal for admin.me |
+|---|---|
+| APIs | `s3:CreateBucket`, `dynamodb:CreateTable`, `lambda:UpdateFunctionCode` … |
+| Regions | `us-east-1` |
+| Hours (UTC) | 13–23 (daytime, US Central) |
+| IPs | `198.51.100.7` (home) |
+
+Two events arrive, both using admin.me's valid key:
+
+| | admin.me, normally | Someone with a stolen key |
+|---|---|---|
+| Action | `s3:CreateBucket` | `ssm:GetParameter` (reading a secret) |
+| Region | us-east-1 ✓ | eu-west-1 ✗ new region, +35 |
+| Time | 3pm ✓ | 4am ✗ unusual hour, +25 |
+| IP | home ✓ | unknown ✗ new IP, +25 |
+| API | used before ✓ | never used ✗ new API +20, high-risk +40 |
+| **Score** | **0: nothing happens** | **145: alert email** |
+
+**Why this matters:** both events come from a real, valid identity, so a list of
+"bad API calls" can't tell them apart. The baseline can, because it knows what
+*this particular person* normally does. That's how the project catches stolen
+credentials and insiders.
+
+### First seed run (October 1, 2026)
+
+What `seed_baseline.py` recorded from our account's CloudTrail history:
+
+| Identity | Regions | Hours (UTC) | IPs | APIs |
+|---|---|---|---|---|
+| `user/admin.me` | 17 (every region) | 0, 1, 18, 19, 20, 23 | 10 (4 are IPv6) | 236 |
+| `user/shadab.dev` | us-east-1, us-east-2 | 22 only | 3 | 17 |
+| `user/rency.dev` | us-east-1, us-east-2 | 19 only | 1 | 15 |
+| `role/insider-threat-detector` | us-east-1 | 1, 19, 20 | 17 (AWS Lambda IPs) | 2 |
+| 5 AWS service and demo roles | various | various | various | mostly read-only lists |
+
+`yael.dev` has no baseline yet (no recorded activity in the last 90 days).
+
+Issues this run revealed:
+- **admin.me's region list is polluted.** The script learned from read-only
+  calls too, including its own `LookupEvents` in every region, so every region
+  looks normal and the new-region signal can't fire for that user. *Fixed:* the
+  script now learns only from events the detector scores (mutating calls plus
+  secret reads, no AWS-service or CloudWatch Logs calls), and removes profiles
+  left over from earlier runs.
+- **IPv6 addresses rotate.** A home network gets new IPv6 addresses over time,
+  which would trip the new-IP signal on normal activity. *Fixed:* IPv6 is now
+  compared by network (`/64`) instead of exact address; IPv4 stays exact.
+- **Lambda API names carry a version suffix** (`CreateFunction20150331`), so
+  `lambda:CreateFunction` on the high-risk list never matched. *Fixed:* the
+  handler and seed script now strip these suffixes.
+- **Teammate profiles are thin.** One active hour each, so the hour signal will
+  fire often until they have more history.
+
+Without a baseline, every identity counts as unknown. The behavioural checks
+(new API, region, hour and IP) can't run, so only the fixed high-risk rules
+apply. Run the seed script after deploying, and re-run it now and then so new
+normal activity is learned (see [Setup](#4-build-the-baselines)).
+
+---
+
 ## Scoring
 
 Every event that reaches the Lambda gets a score. **75 or more sends an alert.**

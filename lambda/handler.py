@@ -2,6 +2,7 @@ import json
 import os
 import datetime
 import ipaddress
+import re
 import boto3
 from boto3.dynamodb.conditions import Key
 
@@ -73,12 +74,31 @@ def resolve_identity(ui):
         return ui.get("arn")
     return None
 
-def parse_ip(value):
-    """Returns the IP string, or None when sourceIPAddress is a hostname (e.g. 's3.amazonaws.com')."""
+# Some services version their event names, e.g. Lambda's
+# 'CreateFunction20150331' or CloudFront's 'CreateDistribution2020_05_31'.
+API_VERSION_SUFFIX = re.compile(r"\d{4}_?\d{2}_?\d{2}(v\d+)?$")
+
+def normalize_event_name(name):
+    """Strips API version suffixes so 'CreateFunction20150331v2' -> 'CreateFunction'."""
+    return API_VERSION_SUFFIX.sub("", name)
+
+def ip_key(value):
+    """
+    Normalises an IP for baseline comparison. IPv4 is kept exact; IPv6 is
+    reduced to its /64 network, because home routers rotate the rest of the
+    address. Returns None for hostnames (e.g. 's3.amazonaws.com').
+    Must match helpers/seed_baseline.py.
+    """
     try:
-        return str(ipaddress.ip_address(value))
+        if "/" in value:
+            # Already normalised (a stored IPv6 /64 network)
+            return str(ipaddress.ip_network(value, strict=False))
+        ip = ipaddress.ip_address(value)
     except (TypeError, ValueError):
         return None
+    if ip.version == 6:
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return str(ip)
 
 def fetch_baseline(identity):
     """
@@ -101,7 +121,8 @@ def fetch_baseline(identity):
         "known_apis": set(profile.get("apis", [])),
         # Seeded hours may come back as Decimal; normalise to int for comparison
         "normal_hours": {int(h) for h in profile.get("hours", [])},
-        "known_ips": set(profile.get("source_ips", []))
+        # Normalised here too, so profiles seeded with full IPv6 addresses still match
+        "known_ips": {k for k in map(ip_key, profile.get("source_ips", [])) if k}
     }
 
 def handler(event, context):
@@ -110,7 +131,7 @@ def handler(event, context):
     identity = resolve_identity(ui) or "unknown"
     
     event_source = d.get("eventSource", "").split(".")[0]  # e.g., 'iam' from 'iam.amazonaws.com'
-    event_name = d.get("eventName", "Unknown")
+    event_name = normalize_event_name(d.get("eventName", "Unknown"))
     api_call = f"{event_source}:{event_name}"
     
     region = d.get("awsRegion", "unknown")
@@ -167,10 +188,10 @@ def handler(event, context):
             anomalies.append(f"Activity outside normal working hours (Hour {event_hour} UTC).")
 
         # Check source IP: a stolen key is usually used from the attacker's machine
-        ip = parse_ip(source_ip)
+        ip = ip_key(source_ip)
         if baseline["known_ips"] and ip is not None and ip not in baseline["known_ips"]:
             score += WEIGHT_NEW_IP
-            anomalies.append(f"Call made from an IP address never seen for this identity: {ip}.")
+            anomalies.append(f"Call made from an IP address never seen for this identity: {source_ip}.")
         
     # 3. Decision Engine: Alert via SNS if threshold is breached
     if score >= ALERT_THRESHOLD:
