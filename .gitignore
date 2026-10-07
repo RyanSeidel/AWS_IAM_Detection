@@ -11,3 +11,5 @@ crash.log
 item*.json
 backend.hcl
 .DS_Store
+__pycache__/
+*.pyc
