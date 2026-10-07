@@ -43,6 +43,10 @@ HIGH_RISK_APIS = {
     "cloudtrail:DeleteTrail": ("Defense Evasion", WEIGHT_DEFENSE_EVASION),
     "cloudtrail:UpdateTrail": ("Defense Evasion", WEIGHT_DEFENSE_EVASION),
     "cloudtrail:PutEventSelectors": ("Defense Evasion", WEIGHT_DEFENSE_EVASION),
+    # Global Defense Evasion
+    "guardduty:DeleteDetector": ("Defense Evasion", WEIGHT_DEFENSE_EVASION),
+    "config:StopConfigurationRecorder": ("Defense Evasion", WEIGHT_DEFENSE_EVASION),
+    "kms:ScheduleKeyDeletion": ("Defense Evasion", WEIGHT_DEFENSE_EVASION),
     # Resource Hijacking / Execution (T1496)
     "ec2:RunInstances": ("Resource Hijacking", WEIGHT_HIGH_RISK_API),
     "lambda:CreateFunction": ("Execution / Persistence", WEIGHT_HIGH_RISK_API),
@@ -163,6 +167,26 @@ def handler(event, context):
         score += weight
         mitre_tactics.append(tactic)
         anomalies.append(f"Highly sensitive operation mapped to MITRE ATT&CK ({tactic}).")
+
+    # Check Scoped Defense Evasion (Tampering with the detector itself)
+    scoped_evasion_apis = {
+        "events:DisableRule", "events:RemoveTargets", "events:DeleteRule",
+        "lambda:UpdateFunctionCode", "lambda:DeleteFunction",
+        "lambda:UpdateFunctionConfiguration", "lambda:PutFunctionConcurrency",
+        "lambda:DeleteFunctionConcurrency", "sns:Unsubscribe"
+    }
+    
+    if api_call in scoped_evasion_apis:
+        req_params = d.get("requestParameters", {}) or {}
+        # Convert the requestParameters dict to a string to easily scan all possible 
+        # target keys (name, rule, functionName, SubscriptionArn) in one pass
+        if "insider-threat" in str(req_params).lower():
+            score += WEIGHT_DEFENSE_EVASION
+            tactic = "Defense Evasion"
+            if tactic not in mitre_tactics:
+                mitre_tactics.append(tactic)
+            anomalies.append(f"CRITICAL: Attempted to tamper with the insider threat detector ({api_call}).")
+    # --- END OF NEW CODE ---
 
     if baseline_error is not None:
         # Fail closed: if we can't judge the event, surface it rather than drop it
