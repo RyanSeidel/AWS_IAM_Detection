@@ -54,3 +54,35 @@ resource "aws_cloudwatch_event_target" "forward" {
   arn      = local.home_bus_arn
   role_arn = aws_iam_role.forwarder.arn
 }
+
+resource "aws_cloudwatch_event_rule" "watchdog_forward" {
+  for_each = local.forwarded_regions
+
+  region        = each.key
+  name          = "insider-threat-watchdog-forward"
+  description   = "Forward tampering events targeting regional forwarders back to us-east-1"
+  
+  event_pattern = jsonencode({
+    "source": ["aws.events"],
+    "detail-type": ["AWS API Call via CloudTrail"],
+    "detail": {
+      "eventName": ["DisableRule", "RemoveTargets", "DeleteRule"],
+      # DisableRule/DeleteRule use "name", RemoveTargets uses "rule".
+      "requestParameters": {
+        "$or": [
+          { "name": [{ "prefix": "insider-threat" }] },
+          { "rule": [{ "prefix": "insider-threat" }] }
+        ]
+      }
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "watchdog_forward_target" {
+  for_each = local.forwarded_regions
+
+  region   = each.key
+  rule     = aws_cloudwatch_event_rule.watchdog_forward[each.key].name
+  arn      = local.home_bus_arn
+  role_arn = aws_iam_role.forwarder.arn
+}
