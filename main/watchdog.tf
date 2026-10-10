@@ -6,16 +6,24 @@ resource "aws_cloudwatch_event_rule" "watchdog_direct" {
     "source": ["aws.events", "aws.lambda", "aws.sns"],
     "detail-type": ["AWS API Call via CloudTrail"],
     "detail": {
+      # Lambda event names carry an API version suffix in CloudTrail
+      # (e.g. DeleteFunction20150331), so those are prefix matches.
       "eventName": [
-        "DisableRule", "RemoveTargets", "DeleteRule",
-        "DeleteFunction", "UpdateFunctionCode", "UpdateFunctionConfiguration",
-        "PutFunctionConcurrency", "DeleteFunctionConcurrency", "Unsubscribe"
+        "DisableRule", "RemoveTargets", "DeleteRule", "Unsubscribe",
+        { "prefix": "DeleteFunction" },
+        { "prefix": "UpdateFunctionCode" },
+        { "prefix": "UpdateFunctionConfiguration" },
+        { "prefix": "PutFunctionConcurrency" },
+        { "prefix": "DeleteFunctionConcurrency" }
       ],
+      # DisableRule/DeleteRule use "name", RemoveTargets uses "rule".
+      # functionName may be a bare name or a full ARN, hence the wildcard.
       "requestParameters": {
         "$or": [
           { "name": [{ "prefix": "insider-threat" }] },
-          { "functionName": [{ "prefix": "insider-threat" }] },
-          { "SubscriptionArn": [{ "wildcard": "*insider-threat*" }] }
+          { "rule": [{ "prefix": "insider-threat" }] },
+          { "functionName": [{ "wildcard": "*insider-threat*" }] },
+          { "subscriptionArn": [{ "wildcard": "*insider-threat*" }] }
         ]
       }
     }

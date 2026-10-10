@@ -67,8 +67,12 @@ resource "aws_cloudwatch_event_rule" "watchdog_forward" {
     "detail-type": ["AWS API Call via CloudTrail"],
     "detail": {
       "eventName": ["DisableRule", "RemoveTargets", "DeleteRule"],
+      # DisableRule/DeleteRule use "name", RemoveTargets uses "rule".
       "requestParameters": {
-        "name": [{ "prefix": "insider-threat" }]
+        "$or": [
+          { "name": [{ "prefix": "insider-threat" }] },
+          { "rule": [{ "prefix": "insider-threat" }] }
+        ]
       }
     }
   })
