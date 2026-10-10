@@ -259,7 +259,13 @@ def handler(event, context):
         if baseline["known_ips"] and ip is not None and ip not in baseline["known_ips"]:
             score += WEIGHT_NEW_IP
             anomalies.append(f"Call made from an IP address never seen for this identity: {source_ip}.")
-        
+            
+    # Any root call alerts, even if it matches the root baseline.
+    if ui.get("type") == "Root":
+        score = max(score, ALERT_THRESHOLD)
+        anomalies.append(
+            "Activity performed by the AWS account root user, which should never be used."
+        )    
     # 3. Decision Engine: Alert via SNS if threshold is breached
     if score >= ALERT_THRESHOLD:
         mitre_string = ", ".join(mitre_tactics) if mitre_tactics else "N/A"

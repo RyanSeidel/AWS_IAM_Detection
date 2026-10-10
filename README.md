@@ -176,6 +176,7 @@ Every event that reaches the Lambda gets a score. **75 or more sends an alert.**
 | At a UTC hour this identity is never active | +25 |
 | From an IP address this identity has never used | +25 |
 | From an identity with no profile at all | +40 |
+| Any activity by the root user | raised to at least 75 |
 | Security group ingress opened to `0.0.0.0/0` or `::/0` | +35 (on top of the high-risk API; alerts on its own) |
 
 
@@ -206,7 +207,7 @@ reading secrets (`GetParameter`, `GetParameters`, `GetSecretValue`) and
 
 ### Tested scenarios
 
-The handler was run against mocked AWS clients in 14 scenarios, and all passed:
+The handler was run against mocked AWS clients in 15 scenarios, and all passed:
 
 | Scenario | Alerts? |
 |---|---|
@@ -223,6 +224,7 @@ The handler was run against mocked AWS clients in 14 scenarios, and all passed:
 | Known user, `GetParameter` + new IP + new API (85) | Yes |
 | Known user, `PutBucketPolicy` + new region + new IP + new API (120) | Yes |
 | Root user, `CreateAccessKey` (80) | Yes |
+| Root user, routine call that matches its profile (75) | Yes |
 | Unknown user, `iam:CreateUser` (80) | Yes |
 
 ---
