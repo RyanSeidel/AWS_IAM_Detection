@@ -23,6 +23,8 @@ WEIGHT_NEW_API = 20
 WEIGHT_UNUSUAL_HOUR = 25
 WEIGHT_NEW_IP = 25
 WEIGHT_HIGH_RISK_API = 40
+WEIGHT_OPEN_TO_WORLD = 35
+OPEN_WORLD_CIDRS = {"0.0.0.0/0", "::/0"}
 # An identity with no baseline profile is itself suspicious (e.g. a freshly
 # created backdoor user). On its own it stays below the threshold; combined
 # with any high-risk API it alerts.
@@ -64,10 +66,38 @@ HIGH_RISK_APIS = {
     "ssm:GetParameter": ("Credential Access", WEIGHT_HIGH_RISK_API),
     "ssm:GetParameters": ("Credential Access", WEIGHT_HIGH_RISK_API),
     "secretsmanager:GetSecretValue": ("Credential Access", WEIGHT_HIGH_RISK_API),
+    # Privilege escalation and backdoor APIs missing from the original list
+    # (T1098 account manipulation, T1136.003 cloud account, T1556.006 MFA disable).
+    # AuthorizeSecurityGroupIngress scores an extra +35 when the rule is 0.0.0.0/0 or ::/0.
+    "iam:CreatePolicyVersion": ("Privilege Escalation", WEIGHT_HIGH_RISK_API),
+    "iam:SetDefaultPolicyVersion": ("Privilege Escalation", WEIGHT_HIGH_RISK_API),
+    "iam:AddUserToGroup": ("Privilege Escalation", WEIGHT_HIGH_RISK_API),
+    "iam:UpdateAssumeRolePolicy": ("Privilege Escalation", WEIGHT_HIGH_RISK_API),
+    "iam:CreateUser": ("Persistence", WEIGHT_HIGH_RISK_API),
+    "iam:DeactivateMFADevice": ("Defense Evasion", WEIGHT_HIGH_RISK_API),
+    "ec2:AuthorizeSecurityGroupIngress": ("Defense Evasion", WEIGHT_HIGH_RISK_API),
     # Collection (T1530). Only arrives if CloudTrail data events are enabled
     # for a bucket, e.g. a decoy bucket, so any read of it is suspicious.
     "s3:GetObject": ("Collection", WEIGHT_HIGH_RISK_API)
 }
+
+def open_world_cidrs(value):
+    """Walk CloudTrail requestParameters and return any 0.0.0.0/0 or ::/0 CIDRs.
+
+    AuthorizeSecurityGroupIngress nests the CIDR under ipPermissions, items,
+    and ipRanges, so a single-field check misses it. A scoped rule returns
+    an empty set and does not get the extra open-to-world points.
+    """
+    found = set()
+    if isinstance(value, dict):
+        for child in value.values():
+            found |= open_world_cidrs(child)
+    elif isinstance(value, list):
+        for child in value:
+            found |= open_world_cidrs(child)
+    elif isinstance(value, str) and value in OPEN_WORLD_CIDRS:
+        found.add(value)
+    return found
 
 def resolve_identity(ui):
     """Extracts the underlying human or role identity from the CloudTrail UserIdentity object."""
@@ -169,6 +199,17 @@ def handler(event, context):
         score += weight
         mitre_tactics.append(tactic)
         anomalies.append(f"Highly sensitive operation mapped to MITRE ATT&CK ({tactic}).")
+        
+    # Extra points only when this security group rule opens the internet.
+    # Extra points only when this security group rule opens the internet.
+    if api_call == "ec2:AuthorizeSecurityGroupIngress":
+        opened = open_world_cidrs(d.get("requestParameters") or {})
+        if opened:
+            score += WEIGHT_OPEN_TO_WORLD
+            anomalies.append(
+                "Security group ingress opened to the internet "
+                f"({', '.join(sorted(opened))})."
+            )
 
     # Check Scoped Defense Evasion (Tampering with the detector itself)
     scoped_evasion_apis = {
