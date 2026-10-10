@@ -4,20 +4,28 @@ Builds per-identity baselines in the insider-threat-baseline table.
     python helpers/seed_baseline.py
         Full scan: real CloudTrail history in every region. Removes stale profiles.
 
-    python helpers/seed_baseline.py --from-file fake_events.json --merge-cloudtrail
-        Synthetic history (gen_fake_history.py) for everyone with a persona,
+    python helpers/seed_baseline.py --personas --merge-cloudtrail
+        Persona files (helpers/personas/*.json) for everyone who has one,
         real CloudTrail history for everyone else. Removes stale profiles.
 
-    python helpers/seed_baseline.py --from-file fake_events.json --only dana-test
-        Resets one identity. Never touches anyone else's profile.
+    python helpers/seed_baseline.py --personas --only dana-test
+        Resets one identity from its persona file. Never touches anyone else's profile.
+
+Persona baselines are synthetic: they describe each person's normal, they
+aren't a record of what they did. Say so in the demo.
 """
 import argparse
+import glob
 import json
 import datetime
 import ipaddress
+import os
 import re
 import boto3
 from collections import defaultdict
+
+# One hand-written profile per identity (helpers/personas/<iam-user>.json).
+PERSONA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "personas")
 
 # Must match lambda/handler.py: strips API version suffixes such as
 # Lambda's 'CreateFunction20150331' so baseline and detector agree on names.
@@ -98,17 +106,47 @@ def fetch_cloudtrail_events():
         except Exception as e:
             print(f"  -> Error or access denied fetching logs in {region}: {e}")
 
-def load_events_file(path):
-    """Reads a JSON list of CloudTrail-shaped events, e.g. from gen_fake_history.py."""
-    with open(path, encoding='utf-8') as f:
-        return json.load(f)
+def normalize_api(api):
+    """'lambda:CreateFunction20150331' -> 'lambda:CreateFunction', matching the scan and the Lambda."""
+    service, _, name = api.partition(':')
+    return f"{service}:{API_VERSION_SUFFIX.sub('', name)}"
+
+def load_personas(account_id):
+    """
+    Reads every helpers/personas/*.json into the same profile shape that
+    build_profiles makes. 'identity' may be an IAM user name or a full ARN.
+    events_per_day and weekdays_only document the persona; the Lambda doesn't
+    score volume or weekdays, so they aren't stored.
+    """
+    personas = {}
+    for path in sorted(glob.glob(os.path.join(PERSONA_DIR, "*.json"))):
+        name = os.path.basename(path)
+        with open(path, encoding='utf-8') as f:
+            p = json.load(f)
+
+        identity = p['identity']
+        if not identity.startswith('arn:'):
+            identity = f"arn:aws:iam::{account_id}:user/{identity}"
+
+        ips = set()
+        for value in p.get('ips', []):
+            key = ip_key(value)
+            if key is None:
+                print(f"  -> {name}: '{value}' is not an IP address, skipped")
+            else:
+                ips.add(key)
+
+        personas[identity] = {
+            "regions": set(p.get('regions', [])),
+            "hours": {int(h) for h in p.get('hours_utc', [])},
+            "apis": {normalize_api(a) for a in p.get('apis', [])},
+            "source_ips": ips,
+        }
+        print(f"Loaded persona {name} -> {identity}")
+    return personas
 
 def build_profiles(events):
-    """
-    Aggregates events into { identity_arn: {regions, hours, apis, source_ips} }.
-    No filtering here: CloudTrail events are filtered when fetched, and a
-    synthetic file is taken as-is because it describes exactly what's normal.
-    """
+    """Aggregates (already filtered) CloudTrail events into { identity_arn: {regions, hours, apis, source_ips} }."""
     profiles = defaultdict(lambda: {"regions": set(), "hours": set(), "apis": set(), "source_ips": set()})
 
     for ct_event in events:
@@ -179,21 +217,23 @@ def write_profiles(profiles, remove_stale):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--from-file', help="JSON list of events to build profiles from (e.g. fake_events.json)")
+    parser.add_argument('--personas', action='store_true',
+                        help="build profiles from helpers/personas/*.json instead of CloudTrail")
     parser.add_argument('--merge-cloudtrail', action='store_true',
-                        help="with --from-file: also scan CloudTrail for identities not in the file")
+                        help="with --personas: also scan CloudTrail for identities without a persona")
     parser.add_argument('--only', help="write just this identity (user name or ARN); nobody else is touched")
     args = parser.parse_args()
 
-    if args.merge_cloudtrail and not args.from_file:
-        parser.error("--merge-cloudtrail needs --from-file")
+    if args.merge_cloudtrail and not args.personas:
+        parser.error("--merge-cloudtrail needs --personas")
 
-    if args.from_file:
-        profiles = build_profiles(load_events_file(args.from_file))
-        print(f"Built {len(profiles)} profiles from {args.from_file}")
+    if args.personas:
+        account_id = boto3.client('sts').get_caller_identity()['Account']
+        profiles = load_personas(account_id)
+        print(f"Built {len(profiles)} profiles from persona files")
         if args.merge_cloudtrail:
-            # Synthetic history wins: real test activity (high-risk calls,
-            # late nights) must not leak into a persona's "normal".
+            # Personas win: real test activity (high-risk calls, late
+            # nights) must not leak into a persona's "normal".
             real = build_profiles(fetch_cloudtrail_events())
             added = {i: p for i, p in real.items() if i not in profiles}
             profiles.update(added)
@@ -204,10 +244,10 @@ def main():
     if args.only:
         profiles = {i: p for i, p in profiles.items() if matches_only(i, args.only)}
         if not profiles:
-            raise SystemExit(f"No events for '{args.only}' in the input")
+            raise SystemExit(f"No profile for '{args.only}' in the input")
 
     # Deleting "stale" profiles is only safe when this run saw everyone.
-    remove_stale = not args.only and (not args.from_file or args.merge_cloudtrail)
+    remove_stale = not args.only and (not args.personas or args.merge_cloudtrail)
 
     print(f"\nWriting {len(profiles)} profiles to DynamoDB...")
     write_profiles(profiles, remove_stale)
