@@ -16,7 +16,9 @@ TABLE_NAME = os.environ["BASELINE_TABLE"]
 # COMPOSITE SCORING WEIGHTS & THRESHOLDS
 # ==========================================
 ALERT_THRESHOLD = 75
-WEIGHT_NEW_REGION = 35
+# Any activity in a region the identity has never used alerts on its own:
+# the team only works in us-east-1, so another region suggests a stolen key.
+WEIGHT_NEW_REGION = ALERT_THRESHOLD
 WEIGHT_NEW_API = 20
 WEIGHT_UNUSUAL_HOUR = 25
 WEIGHT_NEW_IP = 25
