@@ -56,7 +56,7 @@ resource "aws_lambda_function" "detector" {
   environment {
     variables = {
       BASELINE_TABLE = aws_dynamodb_table.baseline.name
-      ALERT_TOPIC = aws_sns_topic.alerts.arn
+      ALERT_TOPIC    = aws_sns_topic.alerts.arn
     }
   }
 
@@ -78,7 +78,10 @@ locals {
       }
       "$or" = [
         { readOnly = [false] },
-        { eventName = ["GetParameter", "GetParameters", "GetSecretValue", "GetObject"] }
+        { eventName = ["GetParameter", "GetParameters", "GetSecretValue", "GetObject"] },
+        # Denied calls, including read-only probes (Task 5). Must match
+        # is_denied() in lambda/handler.py.
+        { errorCode = [{ prefix = "AccessDenied" }, { suffix = "UnauthorizedOperation" }] }
       ]
     }
   })
