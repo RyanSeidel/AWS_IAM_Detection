@@ -29,6 +29,9 @@ OPEN_WORLD_CIDRS = {"0.0.0.0/0", "::/0"}
 # created backdoor user). On its own it stays below the threshold; combined
 # with any high-risk API it alerts.
 WEIGHT_UNKNOWN_IDENTITY = 40
+# A call refused for lack of permission. Someone with a stolen key usually
+# tests what it can do and leaves a string of these (Task 5).
+WEIGHT_ACCESS_DENIED = 25
 # Tampering with logging blinds the detector, so it alerts on its own.
 WEIGHT_DEFENSE_EVASION = ALERT_THRESHOLD
 
@@ -98,6 +101,18 @@ def open_world_cidrs(value):
     elif isinstance(value, str) and value in OPEN_WORLD_CIDRS:
         found.add(value)
     return found
+
+def is_denied(error_code):
+    """
+    True when CloudTrail recorded the call as refused for lack of permission.
+    Covers 'AccessDenied' (IAM, S3), 'AccessDeniedException' (SSM, Lambda,
+    EventBridge), and EC2's 'UnauthorizedOperation' /
+    'Client.UnauthorizedOperation'. Must match the errorCode filter in
+    main/eventbridge.tf.
+    """
+    if not error_code:
+        return False
+    return error_code.startswith("AccessDenied") or error_code.endswith("UnauthorizedOperation")
 
 def resolve_identity(ui):
     """Extracts the underlying human or role identity from the CloudTrail UserIdentity object."""
@@ -210,6 +225,13 @@ def handler(event, context):
                 "Security group ingress opened to the internet "
                 f"({', '.join(sorted(opened))})."
             )
+
+    # Denied calls (Task 5): probing with a stolen key. Added on top of any
+    # high-risk points, so a denied CreateUser still scores as Persistence too.
+    error_code = d.get("errorCode")
+    if is_denied(error_code):
+        score += WEIGHT_ACCESS_DENIED
+        anomalies.append(f"Call was denied ({error_code}): possible permission probing.")
 
     # Check Scoped Defense Evasion (Tampering with the detector itself)
     scoped_evasion_apis = {

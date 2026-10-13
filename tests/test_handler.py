@@ -136,8 +136,7 @@ class CurrentBehaviour(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------
-# Phase 3 tasks. Task 5 is skipped until implemented; remove its
-# @unittest.skip lines when you implement it, then run the tests again.
+# Phase 3 tasks 3, 4 and 5.
 # ----------------------------------------------------------------------
 class Task4RootAlwaysAlerts(unittest.TestCase):
 
@@ -176,21 +175,33 @@ class Task3NewHighRiskApis(unittest.TestCase):
 
 class Task5DeniedCalls(unittest.TestCase):
 
-    @unittest.skip("Task 5 not implemented yet")
     def test_access_denied_adds_points_with_reason(self):
         allowed, _ = run(make_event())
         denied, _ = run(make_event(error_code="AccessDenied"))
         self.assertEqual(denied["score"] - allowed["score"], 25)
         self.assertTrue(any("denied" in r.lower() for r in denied["reasons"]))
 
-    @unittest.skip("Task 5 not implemented yet")
+    def test_ssm_access_denied_exception_counts(self):
+        # SSM, Lambda and EventBridge say 'AccessDeniedException', not 'AccessDenied'
+        result, _ = run(make_event(source="ssm", name="PutParameter",
+                                   error_code="AccessDeniedException"))
+        self.assertEqual(result["score"], handler.WEIGHT_ACCESS_DENIED)
+
+    def test_denied_high_risk_call_keeps_high_risk_points(self):
+        # 7B step 2b: dana's denied CreateUser must show Task 3 AND Task 5
+        result, _ = run(make_event(source="iam", name="CreateUser",
+                                   error_code="AccessDenied"), profile=None)
+        expected = (handler.WEIGHT_HIGH_RISK_API + handler.WEIGHT_ACCESS_DENIED +
+                    handler.WEIGHT_UNKNOWN_IDENTITY)
+        self.assertEqual(result["score"], expected)
+        self.assertIn("Persistence", result["tactics"])
+
     def test_ec2_unauthorized_operation_counts(self):
         for code in ["UnauthorizedOperation", "Client.UnauthorizedOperation"]:
             with self.subTest(code=code):
                 result, _ = run(make_event(source="ec2", name="RunInstances", error_code=code))
                 self.assertTrue(any("denied" in r.lower() for r in result["reasons"]))
 
-    @unittest.skip("Task 5 not implemented yet")
     def test_other_errors_do_not_count(self):
         result, _ = run(make_event(error_code="ThrottlingException"))
         self.assertEqual(result["score"], 0)
