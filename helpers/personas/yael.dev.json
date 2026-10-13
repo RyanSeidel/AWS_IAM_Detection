@@ -1,0 +1,17 @@
+{
+  "identity": "yael.dev",
+  "regions": ["us-east-1"],
+  "hours_utc": [3, 4, 5, 6, 7, 8],
+  "ips": ["64.189.4.190"],
+  "apis": [
+    "lambda:UpdateFunctionCode",
+    "lambda:UpdateFunctionConfiguration",
+    "events:PutRule",
+    "events:PutTargets",
+    "ssm:PutParameter",
+    "ssm:DeleteParameter",
+    "signin:ConsoleLogin"
+  ],
+  "events_per_day": [5, 20],
+  "weekdays_only": true
+}
