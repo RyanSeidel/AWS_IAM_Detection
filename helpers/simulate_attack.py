@@ -158,6 +158,38 @@ SCENARIOS = ["secret-theft", "persistence", "mock-root", "detector-off"]
 
 # Create attack functions for the steps above!
 
+DENIED_SECRETS = [
+    "/prod/db-password",
+    "/prod/api-key",
+    "/prod/stripe-key",
+    "/admin/root-creds",
+    "/prod/jwt-secret",
+]
+
+def probe_denied_secrets(ctx, step):
+    """1a: five GetParameter calls dana cannot make. AccessDenied is the point."""
+    ssm = ctx.dana.client("ssm")  # us-east-1, so this step is not also a new region
+    for name in DENIED_SECRETS:
+        try:
+            ssm.get_parameter(Name=name, WithDecryption=True)
+            print(f"   unexpected success reading {name}")
+        except ClientError as e:
+            print(f"   denied {name}: {e.response['Error']['Code']}")
+    return "ok"
+
+def steal_demo_secret(ctx, step):
+    """1b: the one secret dana can read, from a region she never uses."""
+    ssm = ctx.dana.client("ssm", region_name="eu-west-1")
+    value = ssm.get_parameter(Name="/demo/db-password", WithDecryption=True)
+    print(f"   read /demo/db-password in eu-west-1 ({len(value['Parameter']['Value'])} chars)")
+    return "ok"
+
+for step in STEPS:
+    if step.id == "1a":
+        step.run = probe_denied_secrets
+    elif step.id == "1b":
+        step.run = steal_demo_secret
+
 # def create_access_key(ctx, step):
 
 class Context:
