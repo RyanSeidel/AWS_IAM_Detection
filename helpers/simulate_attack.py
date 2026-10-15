@@ -184,11 +184,29 @@ def steal_demo_secret(ctx, step):
     print(f"   read /demo/db-password in eu-west-1 ({len(value['Parameter']['Value'])} chars)")
     return "ok"
 
+def detector_off(ctx, step):
+    """3: disable only the eu-west-1 forwarding rule. The watchdog carries the event."""
+    ev = ctx.dana.client("events", region_name=FWD_REGION)
+    try:
+        ev.disable_rule(Name=FWD_RULE)
+        print(f"   {FWD_RULE} in {FWD_REGION} DISABLED, waiting for watchdog...")
+        print("   check inbox for the watchdog alert")
+        time.sleep(30)
+    finally:
+        ev.enable_rule(Name=FWD_RULE)
+        state = ev.describe_rule(Name=FWD_RULE)["State"]
+        print(f"   forwarding rule state: {state}")
+        if state != "ENABLED":
+            raise RuntimeError("RE-ENABLE IT MANUALLY NOW")
+    return "ok"
+
 for step in STEPS:
     if step.id == "1a":
         step.run = probe_denied_secrets
     elif step.id == "1b":
         step.run = steal_demo_secret
+    elif step.id == "3":
+        step.run = detector_off
 
 # def create_access_key(ctx, step):
 
