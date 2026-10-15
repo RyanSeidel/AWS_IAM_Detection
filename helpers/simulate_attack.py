@@ -17,6 +17,7 @@ every run starts from the same profile.
 import argparse
 import json
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -200,6 +201,85 @@ def detector_off(ctx, step):
             raise RuntimeError("RE-ENABLE IT MANUALLY NOW")
     return "ok"
 
+BACKDOOR_USER = "svc-backup"
+
+
+def console_url(ctx):
+    """The account's IAM-user console sign-in page."""
+    account = ctx.dana.client("sts").get_caller_identity()["Account"]
+    return f"https://{account}.signin.aws.amazon.com/console"
+
+
+def create_backdoor_key(ctx, step):
+    """2a: dana makes a second access key for herself, an attacker's way back in."""
+    iam = ctx.dana.client("iam")
+    keys = iam.list_access_keys(UserName=DANA)["AccessKeyMetadata"]
+    if len(keys) >= 2:
+        # IAM allows at most 2 keys per user; a leftover from an earlier run blocks this one
+        print(f"   {DANA} already has 2 access keys (the IAM limit). Delete the extra one "
+              f"(aws iam list-access-keys --user-name {DANA}), then rerun.")
+        return "skipped"
+    key = iam.create_access_key(UserName=DANA)["AccessKey"]
+    ctx.created_key_ids.append(key["AccessKeyId"])
+    # Never print the secret: the key is deleted in cleanup and nobody needs it
+    print(f"   created extra access key {key['AccessKeyId']} (secret not shown, deleted in cleanup)")
+    return "ok"
+
+
+def create_backdoor_user(ctx, step):
+    """2b: dana tries to create a backdoor user. Her policy denies it, which is the point."""
+    try:
+        ctx.dana.client("iam").create_user(UserName=BACKDOOR_USER)
+    except ClientError as e:
+        print(f"   denied creating {BACKDOOR_USER}: {e.response['Error']['Code']}")
+        return "ok"
+    # Should never happen: dana-policy.json has no iam:CreateUser
+    print(f"   !! {BACKDOOR_USER} was CREATED, so dana's policy is too broad. Deleting it now.")
+    ctx.admin.client("iam").delete_user(UserName=BACKDOOR_USER)
+    return "ok"
+
+
+def create_console_password(ctx, step):
+    """2c: dana gives herself a console password, so the attacker can use the web console too."""
+    password = secrets.token_urlsafe(16) + "Aa1!"  # meets the default password policy
+    try:
+        ctx.dana.client("iam").create_login_profile(
+            UserName=DANA, Password=password, PasswordResetRequired=False)
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "EntityAlreadyExists":
+            print(f"   {DANA} already has a console password from an earlier run. Remove it with "
+                  f"'aws iam delete-login-profile --user-name {DANA}', then rerun.")
+            return "skipped"
+        raise
+    ctx.created_login_profile = True
+    ctx.dana_password = password
+    print("   dana now has a console password (deleted in cleanup)")
+    return "ok"
+
+
+def console_login_wrong_password(ctx, step):
+    """2d (manual): a failed console sign-in as dana."""
+    if not ctx.dana_password:
+        print("   dana has no console password (2c didn't run), skipping")
+        return "skipped"
+    print(f"   1. Open a private browser window: {console_url(ctx)}")
+    print(f"   2. IAM user name: {DANA}   Password: anything WRONG")
+    input("   Press Enter after the failed sign-in... ")
+    return "ok"
+
+
+def console_login_no_mfa(ctx, step):
+    """2e (manual): a successful console sign-in as dana, without MFA."""
+    if not ctx.dana_password:
+        print("   dana has no console password (2c didn't run), skipping")
+        return "skipped"
+    print(f"   1. Same window: {console_url(ctx)}")
+    print(f"   2. IAM user name: {DANA}   Password: {ctx.dana_password}")
+    print("   3. Once signed in, sign out again (the password is deleted in cleanup)")
+    input("   Press Enter after the successful sign-in... ")
+    return "ok"
+
+
 for step in STEPS:
     if step.id == "1a":
         step.run = probe_denied_secrets
@@ -207,8 +287,16 @@ for step in STEPS:
         step.run = steal_demo_secret
     elif step.id == "3":
         step.run = detector_off
-
-# def create_access_key(ctx, step):
+    elif step.id == "2a":
+        step.run = create_backdoor_key
+    elif step.id == "2b":
+        step.run = create_backdoor_user
+    elif step.id == "2c":
+        step.run = create_console_password
+    elif step.id == "2d":
+        step.run = console_login_wrong_password
+    elif step.id == "2e":
+        step.run = console_login_no_mfa
 
 class Context:
     """Sessions and clients shared by every step, plus what cleanup must undo."""
@@ -220,6 +308,7 @@ class Context:
         # Filled in by steps, emptied by cleanup()
         self.created_key_ids = []
         self.created_login_profile = False
+        self.dana_password = None          # set by 2c, used by the manual sign-ins 2d/2e
 
 # ARN stands form Amazon Resource Name
 # Checks to make sure identity are who they say they are
