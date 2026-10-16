@@ -44,6 +44,8 @@ resource "aws_cloudwatch_event_rule" "forward" {
   region        = each.key
   name          = "insider-threat-forward-to-us-east-1"
   event_pattern = local.risky_event_pattern
+  # Same as the main rule: needed to forward read-only events.
+  state = "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS"
 }
 
 resource "aws_cloudwatch_event_target" "forward" {
