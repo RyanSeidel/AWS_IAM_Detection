@@ -117,8 +117,15 @@ def is_denied(error_code):
 def resolve_identity(ui):
     """Extracts the underlying human or role identity from the CloudTrail UserIdentity object."""
     t = ui.get("type")
-    if t == "IAMUser":
-        return ui.get("arn")
+    
+    # Failed logins often omit 'type', but they always include 'userName'
+    if t == "IAMUser" or (not t and ui.get("userName")):
+        arn = ui.get("arn")
+        if not arn:
+            account = ui.get("accountId", "unknown")
+            arn = f"arn:aws:iam::{account}:user/{ui.get('userName')}"
+        return arn
+        
     if t == "AssumedRole":
         return ui.get("sessionContext", {}).get("sessionIssuer", {}).get("arn")
     if t == "Root":
@@ -216,7 +223,6 @@ def handler(event, context):
         anomalies.append(f"Highly sensitive operation mapped to MITRE ATT&CK ({tactic}).")
         
     # Extra points only when this security group rule opens the internet.
-    # Extra points only when this security group rule opens the internet.
     if api_call == "ec2:AuthorizeSecurityGroupIngress":
         opened = open_world_cidrs(d.get("requestParameters") or {})
         if opened:
@@ -225,6 +231,21 @@ def handler(event, context):
                 "Security group ingress opened to the internet "
                 f"({', '.join(sorted(opened))})."
             )
+
+    # Task 1: Console Sign-in Anomalies
+    if api_call == "signin:ConsoleLogin":
+        response_elements = d.get("responseElements") or {}
+        additional_data = d.get("additionalEventData") or {}
+        
+        # 2d: Failed login (+25)
+        if response_elements.get("ConsoleLogin") == "Failure" or d.get("errorMessage") == "Failed authentication":
+            score += 25
+            anomalies.append("Console sign-in failure (wrong password).")
+            
+        # 2e: Successful login without MFA (+40)
+        elif response_elements.get("ConsoleLogin") == "Success" and additional_data.get("MFAUsed") != "Yes":
+            score += 40
+            anomalies.append("Console sign-in without MFA.")
 
     # Denied calls (Task 5): probing with a stolen key. Added on top of any
     # high-risk points, so a denied CreateUser still scores as Persistence too.
