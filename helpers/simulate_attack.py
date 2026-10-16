@@ -67,7 +67,7 @@ STEPS = [
         what="probes 5 secrets she can't read (/prod/*)",
         exercises="Task 5",
         expected="+25 denied each; repeat bonus on the 5th",
-        min_score=None,
+        min_score=75,
         apis=["ssm:GetParameter"],
     ),
     Step(
@@ -155,7 +155,7 @@ STEPS = [
     ),
 ]
 
-SCENARIOS = ["secret-theft", "persistence", "mock-root", "detector-off"]
+SCENARIOS = ["secret-theft", "persistence", "detector-off", "mock-root"]
 
 # Create attack functions for the steps above!
 
@@ -181,8 +181,11 @@ def probe_denied_secrets(ctx, step):
 def steal_demo_secret(ctx, step):
     """1b: the one secret dana can read, from a region she never uses."""
     ssm = ctx.dana.client("ssm", region_name="eu-west-1")
-    value = ssm.get_parameter(Name="/demo/db-password", WithDecryption=True)
-    print(f"   read /demo/db-password in eu-west-1 ({len(value['Parameter']['Value'])} chars)")
+    try:
+        value = ssm.get_parameter(Name="/demo/db-password", WithDecryption=True)
+        print(f"   read /demo/db-password in eu-west-1 ({len(value['Parameter']['Value'])} chars)")
+    except ClientError as e:
+        print(f"   failed to read /demo/db-password: {e.response['Error']['Code']}")
     return "ok"
 
 def detector_off(ctx, step):
@@ -199,6 +202,33 @@ def detector_off(ctx, step):
         print(f"   forwarding rule state: {state}")
         if state != "ENABLED":
             raise RuntimeError("RE-ENABLE IT MANUALLY NOW")
+    return "ok"
+
+def mock_root(ctx, step):
+    """4: your admin user invokes the Lambda directly with a fake root event."""
+    account = ctx.admin.client("sts").get_caller_identity()["Account"]
+    
+    # Event matches Dana's profile perfectly, so only the Root identity triggers the alert.
+    event = {
+        "detail-type": "AWS API Call via CloudTrail", 
+        "detail": {
+            "eventName": "PutParameter", 
+            "eventSource": "ssm.amazonaws.com",
+            "awsRegion": "us-east-1", 
+            "sourceIPAddress": "203.0.113.10",
+            "eventTime": "2026-10-15T20:00:00Z",
+            "userIdentity": {
+                "type": "Root", 
+                "arn": f"arn:aws:iam::{account}:root"
+            }
+        }
+    }
+    
+    ctx.admin.client("lambda").invoke(
+        FunctionName="insider-threat-detector",
+        Payload=json.dumps(event)
+    )
+    print("   invoked Lambda directly with fake Root event")
     return "ok"
 
 BACKDOOR_USER = "svc-backup"
@@ -297,6 +327,8 @@ for step in STEPS:
         step.run = console_login_wrong_password
     elif step.id == "2e":
         step.run = console_login_no_mfa
+    elif step.id == "4":
+        step.run = mock_root
 
 class Context:
     """Sessions and clients shared by every step, plus what cleanup must undo."""
@@ -325,39 +357,53 @@ def check_identities(ctx):
 # Restarts dana profile to re-do the attack
 def reset_dana(admin_profile):
     """Same as the 6B reset command, run with the admin profile (dana can't write DynamoDB)."""
-    print("Resetting dana's baseline from helpers/personas/dana-test.json ...")
+    print("Resetting dana's baseline from fake_events.json ...")
     env = dict(os.environ)
     if admin_profile:
         env["AWS_PROFILE"] = admin_profile
+        
+    # Updated to use --from-file fake_events.json instead of --personas
+    fake_events_path = os.path.join(REPO_ROOT, "fake_events.json")
     subprocess.run([sys.executable, os.path.join(REPO_ROOT, "helpers", "seed_baseline.py"),
-                    "--personas", "--only", DANA], check=True, env=env)
+                    "--from-file", fake_events_path, "--only", DANA], check=True, env=env)
 
 
 def read_scores(ctx, step, since_ms):
-    """Returns the detector's log lines for this step: the handler's final print(json.dumps(...))."""
+    """Returns the detector's log lines for this step with built-in retry for propagation delay."""
     lines = []
     kwargs = {"logGroupName": LOG_GROUP, "startTime": since_ms, "filterPattern": '"score"'}
-    while True:
-        page = ctx.logs.filter_log_events(**kwargs)
-        for event in page.get("events", []):
-            try:
-                line = json.loads(event["message"])
-            except ValueError:
-                continue
-            if step.identity in line.get("identity", "") and line.get("api") in step.apis:
-                lines.append(line)
-        if "nextToken" not in page:
+    
+    # Retry up to 3 times to allow CloudTrail -> EventBridge -> Lambda propagation delay
+    for attempt in range(3):
+        lines = []
+        paginator_kwargs = kwargs.copy()
+        while True:
+            page = ctx.logs.filter_log_events(**paginator_kwargs)
+            for event in page.get("events", []):
+                try:
+                    line = json.loads(event["message"])
+                except ValueError:
+                    continue
+                
+                step_id = getattr(step, "identity", None) or ""
+                if step_id in line.get("identity", "") and line.get("api") in step.apis:
+                    lines.append(line)
+            if "nextToken" not in page:
+                break
+            paginator_kwargs["nextToken"] = page["nextToken"]
+            
+        if lines:
             break
-        kwargs["nextToken"] = page["nextToken"]
+        time.sleep(5)
+        
     return lines
-
 
 def run_step(ctx, step, wait):
     print(f"\n== {step.id} {step.scenario}: {step.what}")
     if step.manual:
         print(f"   Manual step. Do this in a browser now: {step.what}")
     started_ms = int(time.time() * 1000) - 5000
-    outcome = (step.run or  attack_does_not_exist)(ctx, step)
+    outcome = (step.run or attack_does_not_exist)(ctx, step)
     if outcome == "skipped":
         step.result = {"status": "SKIPPED"}
         return
@@ -372,7 +418,6 @@ def run_step(ctx, step, wait):
     passed = step.min_score is None or best.get("score", 0) >= step.min_score
     step.result = {"status": "PASS" if passed else "FAIL", "score": best.get("score"),
                    "alerted": best.get("alerted"), "reasons": best.get("reasons", [])}
-
 
 def cleanup(ctx):
     """Always runs, even on Ctrl+C or a crash: leaves nothing behind."""

@@ -69,16 +69,15 @@ locals {
   # Matches mutating calls, plus a short list of sensitive reads (secret theft,
   # and S3 object reads where data events are enabled, e.g. a decoy bucket).
   risky_event_pattern = jsonencode({
-    "detail-type" = ["AWS API Call via CloudTrail"]
+    "detail-type" = ["AWS API Call via CloudTrail", "AWS Console Sign In via CloudTrail"]
     detail = {
       eventSource = [{ "anything-but" = ["logs.amazonaws.com"] }]
       userIdentity = {
         invokedBy = [{ exists = false }]
-        type      = ["IAMUser", "AssumedRole", "Root"]
       }
       "$or" = [
         { readOnly = [false] },
-        { eventName = ["GetParameter", "GetParameters", "GetSecretValue", "GetObject"] },
+        { eventName = ["GetParameter", "GetParameters", "GetSecretValue", "GetObject", "ConsoleLogin"] },
         # Denied calls, including read-only probes (Task 5). Must match
         # is_denied() in lambda/handler.py.
         { errorCode = [{ prefix = "AccessDenied" }, { suffix = "UnauthorizedOperation" }] }
