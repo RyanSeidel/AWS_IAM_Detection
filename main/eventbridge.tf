@@ -89,6 +89,10 @@ locals {
 resource "aws_cloudwatch_event_rule" "risky" {
   name          = "insider-threat-risky-calls"
   event_pattern = local.risky_event_pattern
+  # EventBridge only delivers read-only CloudTrail events (GetParameter,
+  # List*, Describe*) to rules in this state. Without it, secret reads and
+  # denied read probes never reach the detector.
+  state = "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS"
 }
 
 resource "aws_cloudwatch_event_target" "detector" {

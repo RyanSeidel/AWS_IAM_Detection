@@ -36,6 +36,19 @@ DANA = "dana-test"
 # Never the us-east-1 main rule: if that stayed disabled the whole detector is off.
 FWD_RULE = "insider-threat-forward-to-us-east-1"
 FWD_REGION = "eu-west-1"
+FULL_STATE = "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS"
+ENABLED_STATES = ("ENABLED", FULL_STATE)
+
+
+def restore_full_state(ctx):
+    """EnableRule turns the rule back to plain ENABLED, which drops read-only
+    events. Put back the state Terraform set, keeping the same pattern
+    (admin profile: dana can't call PutRule)."""
+    ev = ctx.admin.client("events", region_name=FWD_REGION)
+    rule = ev.describe_rule(Name=FWD_RULE)
+    if rule["State"] != FULL_STATE:
+        ev.put_rule(Name=FWD_RULE, EventPattern=rule["EventPattern"], State=FULL_STATE)
+        print(f"   restored {FWD_RULE} ({FWD_REGION}) to {FULL_STATE}")
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -198,9 +211,10 @@ def detector_off(ctx, step):
         time.sleep(30)
     finally:
         ev.enable_rule(Name=FWD_RULE)
+        restore_full_state(ctx)
         state = ev.describe_rule(Name=FWD_RULE)["State"]
         print(f"   forwarding rule state: {state}")
-        if state != "ENABLED":
+        if state not in ENABLED_STATES:
             raise RuntimeError("RE-ENABLE IT MANUALLY NOW")
     return "ok"
 
@@ -439,9 +453,10 @@ def cleanup(ctx):
     # Safety net for detector-off: the forwarding rule must end ENABLED.
     events = ctx.dana.client("events", region_name=FWD_REGION)
     try:
-        if events.describe_rule(Name=FWD_RULE)["State"] != "ENABLED":
+        if events.describe_rule(Name=FWD_RULE)["State"] not in ENABLED_STATES:
             events.enable_rule(Name=FWD_RULE)
             print(f"   re-enabled {FWD_RULE} in {FWD_REGION}")
+        restore_full_state(ctx)
         print(f"   {FWD_RULE} ({FWD_REGION}): {events.describe_rule(Name=FWD_RULE)['State']}")
     except ClientError as e:
         print(f"   !! could not check {FWD_RULE} in {FWD_REGION}: {e}  -> CHECK IT BY HAND NOW")
