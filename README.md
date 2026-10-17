@@ -18,9 +18,9 @@ when the score crosses a threshold.
 |---|---|---|
 | 1. Foundation | Terraform state backend; multi-region CloudTrail trail and log bucket | Done |
 | 2. Detection pipeline | EventBridge rule, cross-region forwarding to us-east-1, Lambda, SNS email alerts | Done |
-| 3. Behavioral detection | Per-identity baselines (`seed_baseline.py`); scoring on new API, region, hour and IP; MITRE ATT&CK mapping; secret reads and exfiltration APIs | Code done; deploy and re-seed pending |
-| 4. Decoy data | A "crown jewels" decoy bucket with CloudTrail data events, so stolen files show up as `s3:GetObject` | Not started |
-| 5. Attack simulation | A `dana-test` script that replays a stolen-credential attack step by step and shows each score ([see below](#demo-flow-phase-5)) | Not started |
+| 3. Behavioral detection | Per-identity baselines (`seed_baseline.py`); scoring on new API, region, hour and IP; MITRE ATT&CK mapping; secret reads and exfiltration APIs | Done |
+| 4. Decoy data | A "crown jewels" decoy bucket with CloudTrail data events, so stolen files show up as `s3:GetObject` | Done |
+| 5. Attack simulation | A `dana-test` script that replays a stolen-credential attack step by step and shows each score ([see below](#demo-flow-phase-5)) | Done |
 | 6. Alert dashboard | A cleaner view of alerts than raw emails: scores, identities, regions, tactics and reasons in one place | Not started |
 
 Each phase builds on the one before. Phase 3's Lambda already scores
