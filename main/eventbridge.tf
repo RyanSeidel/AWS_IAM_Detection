@@ -40,7 +40,12 @@ resource "aws_iam_role_policy" "detector" {
         Effect   = "Allow"
         Action   = ["sns:Publish"]
         Resource = aws_sns_topic.alerts.arn
-      }
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:PutItem"]
+        Resource = aws_dynamodb_table.alerts.arn
+      },
     ]
   })
 }
@@ -57,6 +62,7 @@ resource "aws_lambda_function" "detector" {
     variables = {
       BASELINE_TABLE = aws_dynamodb_table.baseline.name
       ALERT_TOPIC    = aws_sns_topic.alerts.arn
+      ALERTS_TABLE   = aws_dynamodb_table.alerts.name
     }
   }
 
