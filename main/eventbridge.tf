@@ -18,7 +18,7 @@ resource "aws_iam_role" "detector" {
 
 resource "aws_cloudwatch_log_group" "detector" {
   name              = "/aws/lambda/insider-threat-detector"
-  retention_in_days = 7
+  retention_in_days = 30 # the InsiderWatch dashboard reads these logs (dashboard.tf)
 }
 
 resource "aws_iam_role_policy" "detector" {
