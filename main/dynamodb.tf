@@ -1,8 +1,8 @@
 ﻿resource "aws_dynamodb_table" "baseline" {
   name           = "insider-threat-baseline"
   billing_mode   = "PROVISIONED"
-  read_capacity  = 1
-  write_capacity = 1
+  read_capacity  = 5
+  write_capacity = 5
 
   hash_key  = "identity"
   range_key = "facet"
@@ -23,10 +23,12 @@ output "baseline_table" {
 }
 
 resource "aws_dynamodb_table" "alerts" {
-  name         = "insider-threat-alerts"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "identity"
-  range_key    = "sk"
+  name           = "insider-threat-alerts"
+  billing_mode   = "PROVISIONED"
+  read_capacity  = 5
+  write_capacity = 5
+  hash_key       = "identity"
+  range_key      = "sk"
 
   attribute {
     name = "identity"
@@ -46,6 +48,9 @@ resource "aws_dynamodb_table" "alerts" {
     hash_key        = "alerted"
     range_key       = "sk"
     projection_type = "ALL"
+    # GSI requires its own provisioned limits when the table is set to PROVISIONED
+    read_capacity   = 5
+    write_capacity  = 5
   }
 
   ttl {

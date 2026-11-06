@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import boto3
 import datetime
+import os
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError
 from boto3.dynamodb.conditions import Key
 from streamlit_cookies_controller import CookieController
@@ -12,7 +13,7 @@ st.set_page_config(page_title="InsiderWatch Dashboard", layout="wide", initial_s
 # Initialize the cookie controller
 cookie_controller = CookieController()
 
-COGNITO_CLIENT_ID = "${client_id}"
+COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID")
 AWS_REGION = "us-east-1" 
 
 # ==========================================
@@ -117,7 +118,7 @@ HIGH_RISK_APIS = {
 # ==========================================
 # 3. AWS DATA FETCHING
 # ==========================================
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=4)
 def load_dynamodb_data(table_name):
     """Fetches all items to allow global profile filtering"""
     try:
@@ -155,7 +156,8 @@ st.sidebar.markdown("**Select AWS Identity to Inspect:**")
 selected_identity = st.sidebar.selectbox(
     "Identity",
     options=["All Profiles"] + unique_profiles,
-    label_visibility="collapsed"
+    label_visibility="collapsed",
+    key="identity_selector"
 )
 
 st.sidebar.divider()
@@ -175,23 +177,37 @@ filtered_alerts.sort(key=lambda x: x.get('sk', ''), reverse=True)
 
 
 # ==========================================
-# 5. PAGE 1: MY ALERTS (ORIGINAL UI)
+# 5. PAGE 1: MY ALERTS (OPTIMIZED FRAGMENT)
 # ==========================================
 if page == "My alerts":
+    # --- 1. STATIC UI (Outside Fragment: Only loads once) ---
     st.header("My alerts")
     
     if selected_identity == "All Profiles":
         st.markdown("Showing events for **ALL Profiles**. Red is ≥ 75 (Emailed Alert).")
     else:
         st.markdown(f"Events scored for `{selected_identity.split('/')[-1]}`. **Red is ≥ 75 (Emailed Alert)**.")
-    
+        
     show_all = st.checkbox("Show events below 75 (Normal activity)", value=False)
     
-    if not filtered_alerts:
-        st.info("No events found in the alerts table for the selected identity.")
-    else:
+    # --- 2. DYNAMIC UI (Inside Fragment: Refreshes every 5 seconds) ---
+    @st.fragment(run_every=5)
+    def display_alerts_table():
+        fresh_alerts = load_dynamodb_data('insider-threat-alerts')
+        
+        if selected_identity == "All Profiles":
+            current_alerts = fresh_alerts
+        else:
+            current_alerts = [item for item in fresh_alerts if item.get('identity') == selected_identity]
+            
+        current_alerts.sort(key=lambda x: x.get('sk', ''), reverse=True)
+        
+        if not current_alerts:
+            st.info("No events found in the alerts table for the selected identity.")
+            return
+
         formatted_data = []
-        for item in filtered_alerts:
+        for item in current_alerts:
             time_utc = item.get("sk", "").split("#")[0]
             tactics = item.get("tactics", [])
             formatted_data.append({
@@ -207,10 +223,10 @@ if page == "My alerts":
             
         df = pd.DataFrame(formatted_data)
         
-        # Hide the identity column if they already filtered to a specific one
         if selected_identity != "All Profiles":
             df = df.drop(columns=["IDENTITY"])
             
+        # Reads the checkbox value from the static UI above
         display_df = df if show_all else df[df["SCORE"] >= 75]
         
         if display_df.empty:
@@ -224,12 +240,15 @@ if page == "My alerts":
                 return [f'background-color: {color}; color: black'] * len(row)
 
             styled_df = display_df.drop(columns=["_raw_item"]).style.apply(highlight_scores, axis=1)
-            st.dataframe(styled_df, width='stretch', hide_index=True)
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
             
             st.divider()
             st.subheader("Alert Detail View")
+            
             alert_options = display_df.apply(lambda x: f"{x['TIME (UTC)']} | {x['API CALL']} (Score: {x['SCORE']})", axis=1).tolist()
-            selected_alert_str = st.selectbox("Select an event to inspect:", alert_options)
+            
+            # Explicit key added here to prevent losing focus during background refreshes
+            selected_alert_str = st.selectbox("Select an event to inspect:", alert_options, key="alert_detail_dropdown")
             
             selected_index = alert_options.index(selected_alert_str)
             selected_raw_item = display_df.iloc[selected_index]["_raw_item"]
@@ -254,6 +273,8 @@ if page == "My alerts":
                     with st.expander("View Raw SNS Email Body"):
                         st.code(selected_raw_item.get("email_body", "Email body not recorded."), language="text")
 
+    # Execute the fragment
+    display_alerts_table()
 
 # ==========================================
 # 6. PAGE 2: WHAT'S NORMAL FOR ME (ORIGINAL UI)

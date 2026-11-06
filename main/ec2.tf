@@ -1,24 +1,4 @@
-# 1. S3 BUCKET & DYNAMIC CODE UPLOAD
-resource "aws_s3_bucket" "dashboard_code" {
-  bucket_prefix = "insiderwatch-code-"
-  force_destroy = true
-}
-
-resource "aws_s3_object" "dashboard_py" {
-  bucket = aws_s3_bucket.dashboard_code.id
-  key    = "dashboard.py"
-  
-  # Reads the local Python file and injects the Cognito Client ID
-  content = templatefile("${path.module}/../ec2/dashboard.py", {
-    client_id = aws_cognito_user_pool_client.client.id
-  })
-
-  etag = md5(templatefile("${path.module}/../ec2/dashboard.py", {
-    client_id = aws_cognito_user_pool_client.client.id
-  }))
-}
-
-# 2. IAM ROLE & INSTANCE PROFILE
+# 1. IAM ROLE & INSTANCE PROFILE
 resource "aws_iam_role" "dashboard_role" {
   name = "insider-threat-dashboard-role"
   assume_role_policy = jsonencode({
@@ -45,14 +25,6 @@ resource "aws_iam_role_policy" "dashboard_policy" {
           "arn:aws:dynamodb:us-east-1:*:table/insider-threat-alerts",
           "arn:aws:dynamodb:us-east-1:*:table/insider-threat-baseline"
         ]
-      },
-      {
-        Effect = "Allow"
-        Action = ["s3:GetObject", "s3:ListBucket"]
-        Resource = [
-          aws_s3_bucket.dashboard_code.arn,
-          "${aws_s3_bucket.dashboard_code.arn}/*"
-        ]
       }
     ]
   })
@@ -63,7 +35,7 @@ resource "aws_iam_instance_profile" "dashboard_profile" {
   role = aws_iam_role.dashboard_role.name
 }
 
-# 3. EC2 SECURITY GROUP (Public Access, protected by app-level login)
+# 2. EC2 SECURITY GROUP (Public Access, protected by app-level login)
 resource "aws_security_group" "dashboard_sg" {
   name        = "insider-threat-dashboard-sg"
   description = "Security group for Streamlit dashboard"
@@ -92,7 +64,7 @@ resource "aws_security_group" "dashboard_sg" {
   }
 }
 
-# 4. AMAZON EC2 INSTANCE
+# 3. AMAZON EC2 INSTANCE
 data "aws_ami" "amazon_linux_2023" {
   most_recent = true
   owners      = ["amazon"]
@@ -103,6 +75,7 @@ data "aws_ami" "amazon_linux_2023" {
 }
 
 resource "aws_instance" "dashboard" {
+  count                  = var.enable_alb_asg ? 0 : 1
   ami                    = data.aws_ami.amazon_linux_2023.id
   instance_type          = "t2.micro"
   iam_instance_profile   = aws_iam_instance_profile.dashboard_profile.name
@@ -112,37 +85,29 @@ resource "aws_instance" "dashboard" {
 
   user_data = <<-BASH
               #!/bin/bash
-              dnf update -y
-              dnf install -y python3 python3-pip
+              dnf install -y docker
+              systemctl start docker
+              systemctl enable docker
 
-              # 1. Download the code FIRST using the intact system AWS CLI
-              aws s3 cp s3://${aws_s3_bucket.dashboard_code.id}/dashboard.py /home/ec2-user/dashboard.py
-              chown ec2-user:ec2-user /home/ec2-user/dashboard.py
-
-              # 2. Switch to ec2-user, create a virtual environment, and start the app
-              su - ec2-user -c "
-                python3 -m venv /home/ec2-user/venv
-                source /home/ec2-user/venv/bin/activate
-                
-                pip install streamlit pandas boto3 streamlit-cookies-controller
-                
-                export AWS_DEFAULT_REGION=us-east-1
-                
-                nohup python3 -m streamlit run /home/ec2-user/dashboard.py > /home/ec2-user/streamlit.log 2>&1 &
-              "
+              # Pass the Cognito Client ID from Terraform into the container
+              docker run -d \
+                -p 8501:8501 \
+                -e COGNITO_CLIENT_ID="${aws_cognito_user_pool_client.client.id}" \
+                --restart always \
+                shadab998/insiderwatch:latest
               BASH
 
   tags = {
     Name = "InsiderWatch-Dashboard"
   }
 
-  # Forces Terraform to wait for the IAM policy and file upload to finish before booting
+  # Forces Terraform to wait for the IAM policy to finish before booting
   depends_on = [
-    aws_s3_object.dashboard_py,
     aws_iam_role_policy.dashboard_policy
   ] 
 }
 
 output "dashboard_url" {
-  value = "http://${aws_instance.dashboard.public_ip}:8501"
+  value = var.enable_alb_asg ? "http://${aws_lb.dashboard_alb[0].dns_name}" : "http://${aws_instance.dashboard[0].public_ip}:8501"
+  description = "The URL to access the InsiderWatch Dashboard"
 }
