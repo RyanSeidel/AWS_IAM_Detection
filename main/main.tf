@@ -127,3 +127,20 @@ resource "aws_cloudtrail" "main" {
 output "trail_bucket" {
   value = aws_s3_bucket.trail.id
 }
+
+resource "terraform_data" "seed_baselines" {
+  # Force Terraform to wait until the DynamoDB tables are fully created
+  depends_on = [
+    aws_dynamodb_table.baseline,
+    aws_dynamodb_table.alerts
+  ]
+
+  # Run the Python script locally from the root directory
+  provisioner "local-exec" {
+    command = "python ../helpers/seed_baseline.py"
+    
+    environment = {
+      PYTHONIOENCODING = "utf-8"
+    }
+  }
+}
