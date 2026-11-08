@@ -36,6 +36,8 @@ resource "aws_iam_instance_profile" "dashboard_profile" {
 }
 
 # 2. EC2 SECURITY GROUP (Public Access, protected by app-level login)
+# No SSH rule: nobody needs to log in to this server; it is rebuilt from
+# user_data on every change. Port 22 was open to the internet for testing.
 resource "aws_security_group" "dashboard_sg" {
   name        = "insider-threat-dashboard-sg"
   description = "Security group for Streamlit dashboard"
@@ -46,14 +48,6 @@ resource "aws_security_group" "dashboard_sg" {
     to_port     = 8501
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"] 
-  }
-
-  ingress {
-    description = "SSH Access"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
   }
 
   egress {
