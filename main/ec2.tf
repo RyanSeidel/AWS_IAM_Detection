@@ -42,12 +42,16 @@ resource "aws_security_group" "dashboard_sg" {
   name        = "insider-threat-dashboard-sg"
   description = "Security group for Streamlit dashboard"
 
+  # Single-instance mode: the dashboard is reached directly on 8501.
+  # ALB/ASG mode: only the load balancer may reach 8501, so nobody can go
+  # around the ALB (and its health checks) straight to an instance.
   ingress {
-    description = "Streamlit UI - Public"
-    from_port   = 8501
-    to_port     = 8501
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] 
+    description     = var.enable_alb_asg ? "Streamlit UI - from ALB only" : "Streamlit UI - Public"
+    from_port       = 8501
+    to_port         = 8501
+    protocol        = "tcp"
+    cidr_blocks     = var.enable_alb_asg ? [] : ["0.0.0.0/0"]
+    security_groups = var.enable_alb_asg ? [aws_security_group.alb_sg[0].id] : []
   }
 
   egress {
