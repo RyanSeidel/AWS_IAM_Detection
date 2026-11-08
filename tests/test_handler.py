@@ -49,7 +49,8 @@ NORMAL_PROFILE = {
 
 def make_event(source="s3", name="CreateBucket", region="us-east-1",
                ip=HOME_IP, time="2026-10-07T20:15:00Z",
-               identity_type="IAMUser", arn=USER_ARN, error_code=None):
+               identity_type="IAMUser", arn=USER_ARN, error_code=None,
+               request_parameters=None):
     """Builds an EventBridge event shaped like a real CloudTrail record."""
     detail = {
         "eventSource": f"{source}.amazonaws.com",
@@ -61,6 +62,8 @@ def make_event(source="s3", name="CreateBucket", region="us-east-1",
     }
     if error_code:
         detail["errorCode"] = error_code
+    if request_parameters is not None:
+        detail["requestParameters"] = request_parameters
     return {"detail-type": "AWS API Call via CloudTrail", "detail": detail}
 
 
@@ -205,6 +208,54 @@ class Task5DeniedCalls(unittest.TestCase):
     def test_other_errors_do_not_count(self):
         result, _ = run(make_event(error_code="ThrottlingException"))
         self.assertEqual(result["score"], 0)
+
+
+class DatabaseTampering(unittest.TestCase):
+    """Attacks on the detector's own DynamoDB tables alert on their own."""
+
+    BASELINE = "insider-threat-baseline"
+    ALERTS_ARN = "arn:aws:dynamodb:us-east-1:123456789012:table/insider-threat-alerts"
+
+    CALLS = [
+        ("DeleteTable", {"tableName": BASELINE}),
+        ("UpdateTable", {"tableName": BASELINE, "deletionProtectionEnabled": False}),
+        ("UpdateContinuousBackups", {"tableName": BASELINE,
+            "pointInTimeRecoverySpecification": {"pointInTimeRecoveryEnabled": False}}),
+        ("DeleteBackup", {"backupArn": ALERTS_ARN + "/backup/01700000000000-abcd1234"}),
+        ("PutResourcePolicy", {"resourceArn": ALERTS_ARN, "policy": "{}"}),
+        ("DeleteResourcePolicy", {"resourceArn": ALERTS_ARN}),
+    ]
+
+    def test_each_table_attack_alerts_even_from_a_normal_profile(self):
+        for name, params in self.CALLS:
+            with self.subTest(api=name):
+                # The API is already "known" for this user, so only the
+                # tamper rule can push the score over the threshold.
+                profile = dict(NORMAL_PROFILE, known_apis={f"dynamodb:{name}"})
+                event = make_event(source="dynamodb", name=name, request_parameters=params)
+                result, alerted = run(event, profile=profile)
+                self.assertGreaterEqual(result["score"], handler.ALERT_THRESHOLD)
+                self.assertTrue(alerted)
+                self.assertIn("Defense Evasion", result["tactics"])
+                self.assertTrue(any("tamper" in r.lower() for r in result["reasons"]))
+
+    def test_blocked_delete_still_alerts(self):
+        # With protect_data on, DeleteTable fails, but the attempt is still logged.
+        profile = dict(NORMAL_PROFILE, known_apis={"dynamodb:DeleteTable"})
+        event = make_event(source="dynamodb", name="DeleteTable",
+                           request_parameters={"tableName": self.BASELINE},
+                           error_code="ValidationException")
+        result, alerted = run(event, profile=profile)
+        self.assertGreaterEqual(result["score"], handler.ALERT_THRESHOLD)
+        self.assertTrue(alerted)
+
+    def test_other_tables_are_not_tampering(self):
+        profile = dict(NORMAL_PROFILE, known_apis={"dynamodb:DeleteTable"})
+        event = make_event(source="dynamodb", name="DeleteTable",
+                           request_parameters={"tableName": "shop-orders"})
+        result, alerted = run(event, profile=profile)
+        self.assertEqual(result["score"], 0)
+        self.assertFalse(alerted)
 
 
 if __name__ == "__main__":

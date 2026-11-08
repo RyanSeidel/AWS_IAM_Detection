@@ -260,7 +260,14 @@ def handler(event, context):
         "events:DisableRule", "events:RemoveTargets", "events:DeleteRule",
         "lambda:UpdateFunctionCode", "lambda:DeleteFunction",
         "lambda:UpdateFunctionConfiguration", "lambda:PutFunctionConcurrency",
-        "lambda:DeleteFunctionConcurrency", "sns:Unsubscribe"
+        "lambda:DeleteFunctionConcurrency", "sns:Unsubscribe",
+        # The detector's own DynamoDB tables: deleting them, turning off
+        # deletion protection (UpdateTable) or backups, deleting a backup,
+        # or changing who may access them. Deleting the baseline table
+        # would make every identity "unknown" and score far lower.
+        "dynamodb:DeleteTable", "dynamodb:UpdateTable",
+        "dynamodb:UpdateContinuousBackups", "dynamodb:DeleteBackup",
+        "dynamodb:PutResourcePolicy", "dynamodb:DeleteResourcePolicy"
     }
     
     if api_call in scoped_evasion_apis:
