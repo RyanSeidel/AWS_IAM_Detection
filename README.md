@@ -242,6 +242,48 @@ script isn't in the repo yet.
 
 ---
 
+## Try it in your own AWS account (CloudShell)
+
+For classmates or graders: deploys the whole project into **your own** AWS
+account from [AWS CloudShell](https://console.aws.amazon.com/cloudshell/home?region=us-east-1)
+(us-east-1). CloudShell already has the AWS CLI, Python and git, and is already
+logged in, so nothing needs installing on your laptop.
+
+You need a login that can create IAM roles and users (an admin user, or root
+for a personal test account). Restricted lab accounts may not work.
+
+Signed in as root? Expect some root alerts on the dashboard during setup and
+cleanup: root activity always alerts, by design. Pick `dana-test` in the
+identity dropdown to follow the attack.
+
+```bash
+git clone -b test https://github.com/RyanSeidel/AWS_IAM_Detection.git
+cd AWS_IAM_Detection
+bash demo/quickstart.sh you@example.com
+```
+
+About 8 to 10 minutes. The script:
+
+- installs Terraform and boto3 if missing
+- keeps Terraform state in this folder (`main/backend_override.tf`), not the team's S3 bucket
+- deploys the detector, the dashboard and the `dana-test` demo user
+- gives dana an access key (AWS profile `dana-test`) and waits for the dashboard
+- prints the dashboard link and the login
+
+Then launch an attack and watch **My alerts** on the dashboard (about 1 to 5 minutes):
+
+```bash
+python3 helpers/simulate_attack.py secret-theft
+```
+
+**When you're done, remove everything** so nothing keeps costing money:
+
+```bash
+bash demo/cleanup.sh you@example.com
+```
+
+---
+
 ## Repository layout
 
 | Path | What it is |

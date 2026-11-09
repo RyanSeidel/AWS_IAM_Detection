@@ -13,3 +13,6 @@ backend.hcl
 .DS_Store
 __pycache__/
 *.pyc
+
+# Local state override written by demo/quickstart.sh
+main/backend_override.tf
