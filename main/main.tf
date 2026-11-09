@@ -137,7 +137,7 @@ resource "terraform_data" "seed_baselines" {
 
   # Run the Python script locally from the root directory
   provisioner "local-exec" {
-    command = "python ../helpers/seed_baseline.py"
+    command = "python3 ../helpers/seed_baseline.py || python ../helpers/seed_baseline.py"
     
     environment = {
       PYTHONIOENCODING = "utf-8"
