@@ -9,6 +9,63 @@ from boto3.dynamodb.conditions import Key
 sns_client = boto3.client("sns")
 dynamodb = boto3.resource("dynamodb")
 
+iam_client = boto3.client("iam")
+
+ENABLE_CONTAINMENT = os.environ.get("ENABLE_CONTAINMENT", "false").lower() == "true"
+
+DENY_ALL_POLICY = {
+    "Version": "2012-10-17",
+    "Statement": [{"Effect": "Deny", "Action": "*", "Resource": "*"}]
+}
+
+def contain_identity(identity, user_identity):
+    actions = []
+    if not ENABLE_CONTAINMENT:
+        return ["Containment disabled"]
+
+    # Safety: never lock out root or the detector itself
+    if "root" in identity.lower() or "insider-threat-detector" in identity:
+        return ["Skipped: protected identity"]
+
+    try:
+        if user_identity.get("type") == "IAMUser":
+            user_name = user_identity.get("userName")
+            if not user_name:
+                return ["No username found"]
+
+            # Attach DenyAll
+            iam_client.put_user_policy(
+                UserName=user_name,
+                PolicyName="InsiderThreat-DenyAll",
+                PolicyDocument=json.dumps(DENY_ALL_POLICY)
+            )
+            actions.append(f"Attached DenyAll to user {user_name}")
+
+            # Deactivate access keys
+            for key in iam_client.list_access_keys(UserName=user_name).get("AccessKeyMetadata", []):
+                if key["Status"] == "Active":
+                    iam_client.update_access_key(
+                        UserName=user_name,
+                        AccessKeyId=key["AccessKeyId"],
+                        Status="Inactive"
+                    )
+                    actions.append(f"Deactivated key {key['AccessKeyId']}")
+
+        elif user_identity.get("type") == "AssumedRole":
+            role_name = identity.split("/")[-1]
+            iam_client.put_role_policy(
+                RoleName=role_name,
+                PolicyName="InsiderThreat-DenyAll",
+                PolicyDocument=json.dumps(DENY_ALL_POLICY)
+            )
+            actions.append(f"Attached DenyAll to role {role_name}")
+
+    except Exception as e:
+        actions.append(f"Containment error: {e}")
+        print(f"Containment failed for {identity}: {e}")
+
+    return actions
+
 TOPIC_ARN = os.environ["ALERT_TOPIC"]
 TABLE_NAME = os.environ["BASELINE_TABLE"]
 ALERTS_TABLE_NAME = os.environ.get("ALERTS_TABLE")
@@ -319,6 +376,9 @@ def handler(event, context):
         )    
     # 3. Decision Engine: Alert via SNS if threshold is breached
     if score >= ALERT_THRESHOLD:
+        containment_actions = contain_identity(identity, ui)
+        containment_text = "\n- ".join(containment_actions) if containment_actions else "None"
+
         mitre_string = ", ".join(mitre_tactics) if mitre_tactics else "N/A"
         explanations = "\n- ".join(anomalies)
         
@@ -333,6 +393,7 @@ def handler(event, context):
             f"MITRE Tactic: {mitre_string}\n\n"
             f"Why this alert fired:\n"
             f"- {explanations}\n\n"
+            f"Containment Actions:\n- {containment_text}\n\n"
             f"Action Required: Verify intent with identity owner. If unauthorized, revoke active IAM sessions immediately."
         )
         
