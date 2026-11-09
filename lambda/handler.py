@@ -11,6 +11,7 @@ dynamodb = boto3.resource("dynamodb")
 
 TOPIC_ARN = os.environ["ALERT_TOPIC"]
 TABLE_NAME = os.environ["BASELINE_TABLE"]
+ALERTS_TABLE_NAME = os.environ.get("ALERTS_TABLE")
 
 # ==========================================
 # COMPOSITE SCORING WEIGHTS & THRESHOLDS
@@ -259,7 +260,14 @@ def handler(event, context):
         "events:DisableRule", "events:RemoveTargets", "events:DeleteRule",
         "lambda:UpdateFunctionCode", "lambda:DeleteFunction",
         "lambda:UpdateFunctionConfiguration", "lambda:PutFunctionConcurrency",
-        "lambda:DeleteFunctionConcurrency", "sns:Unsubscribe"
+        "lambda:DeleteFunctionConcurrency", "sns:Unsubscribe",
+        # The detector's own DynamoDB tables: deleting them, turning off
+        # deletion protection (UpdateTable) or backups, deleting a backup,
+        # or changing who may access them. Deleting the baseline table
+        # would make every identity "unknown" and score far lower.
+        "dynamodb:DeleteTable", "dynamodb:UpdateTable",
+        "dynamodb:UpdateContinuousBackups", "dynamodb:DeleteBackup",
+        "dynamodb:PutResourcePolicy", "dynamodb:DeleteResourcePolicy"
     }
     
     if api_call in scoped_evasion_apis:
@@ -330,6 +338,43 @@ def handler(event, context):
         
         subject = f"[Severity: HIGH] Suspicious IAM Behavior Detected: {api_call}"[:100]
         sns_client.publish(TopicArn=TOPIC_ARN, Subject=subject, Message=body)
+
+    # --- TASK 9: SAVE TO ALERTS TABLE ---
+    if ALERTS_TABLE_NAME:
+        # ONLY write to the database if the event is actually suspicious (score > 0)
+        if score > 0:
+            try:
+                # Calculate 30-day TTL epoch
+                expires_at = int((datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30)).timestamp())
+                event_id = d.get("eventID", "unknown-id")
+                
+                # Use string "true" or "false" for the GSI partition key
+                is_alert = "true" if score >= ALERT_THRESHOLD else "false"
+
+                alert_item = {
+                    "identity": identity,
+                    "sk": f"{event_time_str}#{event_id}",
+                    "alerted": is_alert,
+                    "score": score,
+                    "api": api_call,
+                    "region": region,
+                    "source_ip": source_ip,
+                    "tactics": mitre_tactics,
+                    "reasons": anomalies,
+                    "expires_at": expires_at
+                }
+
+                # If it triggered an email, store the exact subject and body
+                if score >= ALERT_THRESHOLD:
+                    alert_item["email_subject"] = subject
+                    alert_item["email_body"] = body
+
+                alerts_table = dynamodb.Table(ALERTS_TABLE_NAME)
+                alerts_table.put_item(Item=alert_item)
+                
+            except Exception as e:
+                # Catching the exception ensures the Lambda does not crash and the email still sends
+                print(f"Failed to write event to DynamoDB alerts table: {e}")
 
     print(json.dumps({
         "identity": identity,

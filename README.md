@@ -354,6 +354,64 @@ idle, leaving it running is usually simpler.
 
 ---
 
+## Data protection and recovery
+
+The detector depends on its two DynamoDB tables: `insider-threat-baseline`
+(what "normal" is) and `insider-threat-alerts` (the dashboard's history).
+Deleting the baseline table is a bypass, because every identity then counts
+as "unknown" (+40) instead of being scored against its profile.
+
+**Detection (always on).** Deleting either table, turning off its deletion
+protection or backups (`UpdateTable`, `UpdateContinuousBackups`), deleting a
+backup, or changing its resource policy scores 75 (Defense Evasion) and
+alerts. The `insider-threat-watchdog-tables` rule also emails the SNS topic
+directly, so the alert arrives even if the Lambda is down.
+
+**Protection (opt-in).** Off by default, like the ALB/ASG option, so nobody
+reusing this project pays for it unknowingly:
+
+```bash
+terraform apply -var="alert_email=you@example.com" -var="protect_data=true"
+```
+
+This turns on, for both tables:
+- **deletion protection**: `DeleteTable` fails until protection is turned off
+- **point-in-time recovery**: continuous backups, restorable to any second
+
+To tear down with it on, first apply with `-var="protect_data=false"`, then
+run `terraform destroy`. Applying the switch itself sends an `UpdateTable`
+alert; that one is expected.
+
+**Restoring after an attack** (needs `protect_data=true` beforehand):
+
+- *Table deleted:* DynamoDB keeps a system backup named
+  `<table>$DeletedTableBackup` for 35 days. Find it and restore it under the
+  original name, then run `terraform apply` to re-apply our settings:
+
+  ```bash
+  aws dynamodb list-backups --table-name insider-threat-alerts --backup-type SYSTEM
+  aws dynamodb restore-table-from-backup \
+      --target-table-name insider-threat-alerts --backup-arn <BackupArn from above>
+  ```
+
+- *Rows deleted or edited:* restore a copy from just before the attack (a
+  restore always creates a new table), check it, then copy the rows back:
+
+  ```bash
+  aws dynamodb restore-table-to-point-in-time \
+      --source-table-name insider-threat-alerts \
+      --target-table-name insider-threat-alerts-restored \
+      --restore-date-time 2026-11-07T20:00:00Z
+  ```
+
+- *Baselines only:* they can also be rebuilt without a backup:
+  `python3 helpers/seed_baseline.py --from-file fake_events.json --merge-cloudtrail`.
+  Alerts cannot be rebuilt this way, which is why backups matter most for them.
+
+**Dashboard server.** There is no SSH access: port 22 is closed and the
+instance is rebuilt from `user_data`. With `enable_alb_asg=true`, port 8501
+only accepts traffic from the load balancer.
+
 ## Known limitations
 
 - **Shared roles share a baseline.** Assumed-role sessions resolve to the role
