@@ -27,6 +27,19 @@ resource "aws_iam_role_policy" "detector" {
     Version = "2012-10-17"
     Statement = [
       {
+        Effect = "Allow"
+        Action = [
+          "iam:PutUserPolicy",
+          "iam:DeleteUserPolicy",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:ListAccessKeys",
+          "iam:UpdateAccessKey",
+          "iam:GetUser"
+        ]
+        Resource = "*"
+      },
+      {
         Effect   = "Allow"
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = "${aws_cloudwatch_log_group.detector.arn}:*"
@@ -63,6 +76,7 @@ resource "aws_lambda_function" "detector" {
       BASELINE_TABLE = aws_dynamodb_table.baseline.name
       ALERT_TOPIC    = aws_sns_topic.alerts.arn
       ALERTS_TABLE   = aws_dynamodb_table.alerts.name
+      ENABLE_CONTAINMENT = "false"
     }
   }
 
