@@ -42,17 +42,9 @@ resource "aws_security_group" "dashboard_sg" {
   name        = "insider-threat-dashboard-sg"
   description = "Security group for Streamlit dashboard"
 
-  # Single-instance mode: the dashboard is reached directly on 8501.
-  # ALB/ASG mode: only the load balancer may reach 8501, so nobody can go
-  # around the ALB (and its health checks) straight to an instance.
-  ingress {
-    description     = var.enable_alb_asg ? "Streamlit UI - from ALB only" : "Streamlit UI - Public"
-    from_port       = 8501
-    to_port         = 8501
-    protocol        = "tcp"
-    cidr_blocks     = var.enable_alb_asg ? [] : ["0.0.0.0/0"]
-    security_groups = var.enable_alb_asg ? [aws_security_group.alb_sg[0].id] : []
-  }
+  # Port 8501 rules are separate resources below, not inline blocks, so
+  # Terraform removes the "from ALB" rule before it deletes the ALB's
+  # security group when HA mode is switched off.
 
   egress {
     from_port   = 0
@@ -60,6 +52,29 @@ resource "aws_security_group" "dashboard_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+}
+
+# Single-instance mode: the dashboard is reached directly on 8501.
+resource "aws_vpc_security_group_ingress_rule" "dashboard_public" {
+  count             = var.enable_alb_asg ? 0 : 1
+  security_group_id = aws_security_group.dashboard_sg.id
+  description       = "Streamlit UI - Public"
+  ip_protocol       = "tcp"
+  from_port         = 8501
+  to_port           = 8501
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+# ALB/ASG mode: only the load balancer may reach 8501, so nobody can go
+# around the ALB (and its health checks) straight to an instance.
+resource "aws_vpc_security_group_ingress_rule" "dashboard_from_alb" {
+  count                        = var.enable_alb_asg ? 1 : 0
+  security_group_id            = aws_security_group.dashboard_sg.id
+  description                  = "Streamlit UI - from ALB only"
+  ip_protocol                  = "tcp"
+  from_port                    = 8501
+  to_port                      = 8501
+  referenced_security_group_id = aws_security_group.alb_sg[0].id
 }
 
 # 3. AMAZON EC2 INSTANCE
