@@ -76,7 +76,6 @@ resource "aws_lambda_function" "detector" {
       BASELINE_TABLE = aws_dynamodb_table.baseline.name
       ALERT_TOPIC    = aws_sns_topic.alerts.arn
       ALERTS_TABLE   = aws_dynamodb_table.alerts.name
-      ENABLE_CONTAINMENT = "false"
     }
   }
 
@@ -126,4 +125,20 @@ resource "aws_lambda_permission" "events" {
   function_name = aws_lambda_function.detector.function_name
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.risky.arn
+}
+
+data "archive_file" "quarantine" {
+  type        = "zip"
+  source_file = "${path.module}/../lambda/quarantine.py"
+  output_path = "${path.module}/quarantine.zip"
+}
+
+resource "aws_lambda_function" "quarantine" {
+  function_name    = "insider-threat-quarantine"
+  role             = aws_iam_role.detector.arn
+  handler          = "quarantine.handler"
+  runtime          = "python3.13"
+  filename         = data.archive_file.quarantine.output_path
+  source_code_hash = data.archive_file.quarantine.output_base64sha256
+  timeout          = 15
 }
