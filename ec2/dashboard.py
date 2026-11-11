@@ -274,55 +274,84 @@ if page == "My alerts":
                     with st.expander("View Raw SNS Email Body"):
                         st.code(selected_raw_item.get("email_body", "Email body not recorded."), language="text")
             # --- PREVENTION BUTTONS ---
-            if score >= 100:   # only show for very high scores
+            if score >= 100:
                 st.divider()
                 st.subheader("Prevention Actions")
                 
                 identity_arn = selected_raw_item.get("identity", "")
                 user_type = "IAMUser" if ":user/" in identity_arn else "AssumedRole"
                 user_name = identity_arn.split("/")[-1] if user_type == "IAMUser" else None
+                sk = selected_raw_item.get("sk")
 
                 col_block, col_revoke = st.columns(2)
 
+                # Block confirmation
                 with col_block:
-                    if st.button("Block this identity", type="primary", key=f"block_{selected_raw_item.get('sk')}"):
-                        try:
-                            lambda_client = boto3.client("lambda", region_name=AWS_REGION)
-                            payload = {
-                                "action": "block",
-                                "identity": identity_arn,
-                                "user_type": user_type,
-                                "user_name": user_name
-                            }
-                            response = lambda_client.invoke(
-                                FunctionName="insider-threat-quarantine",
-                                InvocationType="RequestResponse",
-                                Payload=json.dumps(payload)
-                            )
-                            result = json.loads(response["Payload"].read().decode())
-                            st.success(f"Blocked successfully: {result}")
-                        except Exception as e:
-                            st.error(f"Failed to block: {e}")
+                    if st.session_state.get(f"confirm_block_{sk}") != True:
+                        if st.button("Block this identity", type="primary", key=f"block_{sk}"):
+                            st.session_state[f"confirm_block_{sk}"] = True
+                            st.rerun()
+                    else:
+                        st.warning("Are you sure you want to BLOCK this identity?")
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            if st.button("Yes, Block", key=f"yes_block_{sk}"):
+                                try:
+                                    lambda_client = boto3.client("lambda", region_name=AWS_REGION)
+                                    payload = {
+                                        "action": "block",
+                                        "identity": identity_arn,
+                                        "user_type": user_type,
+                                        "user_name": user_name
+                                    }
+                                    response = lambda_client.invoke(
+                                        FunctionName="insider-threat-quarantine",
+                                        InvocationType="RequestResponse",
+                                        Payload=json.dumps(payload)
+                                    )
+                                    result = json.loads(response["Payload"].read().decode())
+                                    st.success(f"Blocked successfully: {result}")
+                                except Exception as e:
+                                    st.error(f"Failed to block: {e}")
+                                st.session_state[f"confirm_block_{sk}"] = False
+                        with c2:
+                            if st.button("❌ Cancel", key=f"cancel_block_{sk}"):
+                                st.session_state[f"confirm_block_{sk}"] = False
+                                st.rerun()
 
+                # Revoke confirmation
                 with col_revoke:
-                    if st.button("Revoke / Unblock", key=f"revoke_{selected_raw_item.get('sk')}"):
-                        try:
-                            lambda_client = boto3.client("lambda", region_name=AWS_REGION)
-                            payload = {
-                                "action": "revoke",
-                                "identity": identity_arn,
-                                "user_type": user_type,
-                                "user_name": user_name
-                            }
-                            response = lambda_client.invoke(
-                                FunctionName="insider-threat-quarantine",
-                                InvocationType="RequestResponse",
-                                Payload=json.dumps(payload)
-                            )
-                            result = json.loads(response["Payload"].read().decode())
-                            st.success(f"Revoked successfully: {result}")
-                        except Exception as e:
-                            st.error(f"Failed to revoke: {e}")
+                    if st.session_state.get(f"confirm_revoke_{sk}") != True:
+                        if st.button("Revoke / Unblock", key=f"revoke_{sk}"):
+                            st.session_state[f"confirm_revoke_{sk}"] = True
+                            st.rerun()
+                    else:
+                        st.warning("Are you sure you want to REVOKE (unblock) this identity?")
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            if st.button("Yes, Revoke", key=f"yes_revoke_{sk}"):
+                                try:
+                                    lambda_client = boto3.client("lambda", region_name=AWS_REGION)
+                                    payload = {
+                                        "action": "revoke",
+                                        "identity": identity_arn,
+                                        "user_type": user_type,
+                                        "user_name": user_name
+                                    }
+                                    response = lambda_client.invoke(
+                                        FunctionName="insider-threat-quarantine",
+                                        InvocationType="RequestResponse",
+                                        Payload=json.dumps(payload)
+                                    )
+                                    result = json.loads(response["Payload"].read().decode())
+                                    st.success(f"Revoked successfully: {result}")
+                                except Exception as e:
+                                    st.error(f"Failed to revoke: {e}")
+                                st.session_state[f"confirm_revoke_{sk}"] = False
+                        with c2:
+                            if st.button("❌ Cancel", key=f"cancel_revoke_{sk}"):
+                                st.session_state[f"confirm_revoke_{sk}"] = False
+                                st.rerun()
     # Execute the fragment
     display_alerts_table()
 
