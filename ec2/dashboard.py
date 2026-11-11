@@ -315,7 +315,7 @@ if page == "My alerts":
                                     st.error(f"Failed to block: {e}")
                                 st.session_state[f"confirm_block_{sk}"] = False
                         with c2:
-                            if st.button("❌ Cancel", key=f"cancel_block_{sk}"):
+                            if st.button("Cancel", key=f"cancel_block_{sk}"):
                                 st.session_state[f"confirm_block_{sk}"] = False
                                 st.rerun()
 
