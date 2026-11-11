@@ -3,6 +3,7 @@ import pandas as pd
 import boto3
 import datetime
 import os
+import json
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError
 from boto3.dynamodb.conditions import Key
 from streamlit_cookies_controller import CookieController
@@ -272,7 +273,32 @@ if page == "My alerts":
                     st.warning("This event crossed the 75-point threshold and triggered an email.")
                     with st.expander("View Raw SNS Email Body"):
                         st.code(selected_raw_item.get("email_body", "Email body not recorded."), language="text")
+            # --- PREVENTION BUTTON ---
+            if score >= 100:   # only show for very high scores
+                st.divider()
+                st.subheader("Prevention Actions")
+                
+                identity_arn = selected_raw_item.get("identity", "")
+                user_type = "IAMUser" if ":user/" in identity_arn else "AssumedRole"
+                user_name = identity_arn.split("/")[-1] if user_type == "IAMUser" else None
 
+                if st.button(" Block this identity (DenyAll + deactivate keys)", type="primary", key=f"block_{selected_raw_item.get('sk')}"):
+                    try:
+                        lambda_client = boto3.client("lambda", region_name=AWS_REGION)
+                        payload = {
+                            "identity": identity_arn,
+                            "user_type": user_type,
+                            "user_name": user_name
+                        }
+                        response = lambda_client.invoke(
+                            FunctionName="insider-threat-quarantine",
+                            InvocationType="RequestResponse",
+                            Payload=json.dumps(payload)
+                        )
+                        result = json.loads(response["Payload"].read().decode())
+                        st.success(f"Blocked successfully: {result}")
+                    except Exception as e:
+                        st.error(f"Failed to block: {e}")
     # Execute the fragment
     display_alerts_table()
 
