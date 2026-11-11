@@ -273,7 +273,7 @@ if page == "My alerts":
                     st.warning("This event crossed the 75-point threshold and triggered an email.")
                     with st.expander("View Raw SNS Email Body"):
                         st.code(selected_raw_item.get("email_body", "Email body not recorded."), language="text")
-            # --- PREVENTION BUTTON ---
+            # --- PREVENTION BUTTONS ---
             if score >= 100:   # only show for very high scores
                 st.divider()
                 st.subheader("Prevention Actions")
@@ -282,23 +282,47 @@ if page == "My alerts":
                 user_type = "IAMUser" if ":user/" in identity_arn else "AssumedRole"
                 user_name = identity_arn.split("/")[-1] if user_type == "IAMUser" else None
 
-                if st.button(" Block this identity (DenyAll + deactivate keys)", type="primary", key=f"block_{selected_raw_item.get('sk')}"):
-                    try:
-                        lambda_client = boto3.client("lambda", region_name=AWS_REGION)
-                        payload = {
-                            "identity": identity_arn,
-                            "user_type": user_type,
-                            "user_name": user_name
-                        }
-                        response = lambda_client.invoke(
-                            FunctionName="insider-threat-quarantine",
-                            InvocationType="RequestResponse",
-                            Payload=json.dumps(payload)
-                        )
-                        result = json.loads(response["Payload"].read().decode())
-                        st.success(f"Blocked successfully: {result}")
-                    except Exception as e:
-                        st.error(f"Failed to block: {e}")
+                col_block, col_revoke = st.columns(2)
+
+                with col_block:
+                    if st.button("Block this identity", type="primary", key=f"block_{selected_raw_item.get('sk')}"):
+                        try:
+                            lambda_client = boto3.client("lambda", region_name=AWS_REGION)
+                            payload = {
+                                "action": "block",
+                                "identity": identity_arn,
+                                "user_type": user_type,
+                                "user_name": user_name
+                            }
+                            response = lambda_client.invoke(
+                                FunctionName="insider-threat-quarantine",
+                                InvocationType="RequestResponse",
+                                Payload=json.dumps(payload)
+                            )
+                            result = json.loads(response["Payload"].read().decode())
+                            st.success(f"Blocked successfully: {result}")
+                        except Exception as e:
+                            st.error(f"Failed to block: {e}")
+
+                with col_revoke:
+                    if st.button("Revoke / Unblock", key=f"revoke_{selected_raw_item.get('sk')}"):
+                        try:
+                            lambda_client = boto3.client("lambda", region_name=AWS_REGION)
+                            payload = {
+                                "action": "revoke",
+                                "identity": identity_arn,
+                                "user_type": user_type,
+                                "user_name": user_name
+                            }
+                            response = lambda_client.invoke(
+                                FunctionName="insider-threat-quarantine",
+                                InvocationType="RequestResponse",
+                                Payload=json.dumps(payload)
+                            )
+                            result = json.loads(response["Payload"].read().decode())
+                            st.success(f"Revoked successfully: {result}")
+                        except Exception as e:
+                            st.error(f"Failed to revoke: {e}")
     # Execute the fragment
     display_alerts_table()
 

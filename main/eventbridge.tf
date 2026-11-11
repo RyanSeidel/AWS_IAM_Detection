@@ -141,4 +141,9 @@ resource "aws_lambda_function" "quarantine" {
   filename         = data.archive_file.quarantine.output_path
   source_code_hash = data.archive_file.quarantine.output_base64sha256
   timeout          = 15
+  environment {
+    variables = {
+      ALERT_TOPIC = aws_sns_topic.alerts.arn
+    }
+  }
 }
