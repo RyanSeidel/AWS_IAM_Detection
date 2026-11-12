@@ -6,8 +6,8 @@
 #   bash demo/quickstart.sh you@example.com
 #
 # It installs Terraform, keeps Terraform state in this folder (not the team's
-# S3 bucket), deploys the detector + dashboard + the dana-test demo user, gives
-# dana a key, and waits until the dashboard is up. Takes about 8-10 minutes.
+# S3 bucket), deploys the detector + dashboard + the dana-test demo user (a real
+# IAM user), gives dana a key, and waits until the dashboard is up. Takes about 8-10 minutes.
 # Remove everything afterwards with: bash demo/cleanup.sh you@example.com
 set -euo pipefail
 
@@ -45,12 +45,7 @@ fi
 terraform -version | head -1
 python3 -c 'import boto3' 2>/dev/null || pip3 install --user -q boto3
 
-step "3/7 Using local Terraform state, and pointing dana's fake history at your account"
-# fake_events.json was generated in the team's account, so its ARNs carry the
-# team's account ID. Without this, dana's baseline would be saved under an ARN
-# that doesn't exist here, and the detector would treat her as "unknown".
-sed -i "s/${TEAM_ACCOUNT}/${ACCOUNT}/g" "$ROOT/fake_events.json"
-
+step "3/7 Using local Terraform state (not the team's S3 bucket)"
 cd "$ROOT/main"
 printf 'terraform {\n  backend "local" {}\n}\n' > backend_override.tf
 terraform init -input=false -reconfigure >/dev/null
@@ -98,9 +93,11 @@ cat <<MSG
 
   Check your email ($EMAIL) and click the SNS confirmation link to get alert emails.
 
-  Launch an attack, then open "My alerts" (alerts appear within about 1-5 minutes):
-    cd $ROOT
-    python3 helpers/simulate_attack.py secret-theft
+  Attack: real AWS calls as dana-test. Then pick dana-test in the identity
+  dropdown and open "My alerts" (alerts appear within about 1-5 minutes):
+    aws ssm get-parameter --name /demo/db-password --with-decryption --region eu-west-1 --profile dana-test
+    aws iam create-access-key --user-name dana-test --profile dana-test
+    aws iam create-user --user-name backdoor-admin --profile dana-test   (AccessDenied is expected; it still alerts)
 
   When finished, remove everything (stops all costs):
     bash demo/cleanup.sh $EMAIL
