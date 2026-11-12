@@ -80,7 +80,7 @@ resource "aws_launch_template" "dashboard_lt" {
   count         = var.enable_alb_asg ? 1 : 0
   name_prefix   = "insider-threat-lt-"
   image_id      = data.aws_ami.amazon_linux_2023.id
-  instance_type = "t2.micro"
+  instance_type = "t3.micro"
 
   iam_instance_profile {
     name = aws_iam_instance_profile.dashboard_profile.name
