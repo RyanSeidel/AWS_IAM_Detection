@@ -274,7 +274,7 @@ if page == "My alerts":
                     with st.expander("View Raw SNS Email Body"):
                         st.code(selected_raw_item.get("email_body", "Email body not recorded."), language="text")
             # --- PREVENTION BUTTONS ---
-            if score >= 100:
+            if score >= ALERT_THRESHOLD:
                 st.divider()
                 st.subheader("Prevention Actions")
                 
@@ -310,10 +310,11 @@ if page == "My alerts":
                                         Payload=json.dumps(payload)
                                     )
                                     result = json.loads(response["Payload"].read().decode())
-                                    st.success(f"Blocked successfully: {result}")
+                                    st.session_state[f"result_{sk}"] = ("success", f"Blocked successfully: {result}")
                                 except Exception as e:
-                                    st.error(f"Failed to block: {e}")
+                                    st.session_state[f"result_{sk}"] = ("error", f"Failed to block: {e}")
                                 st.session_state[f"confirm_block_{sk}"] = False
+                                st.rerun(scope="fragment")
                         with c2:
                             if st.button("Cancel", key=f"cancel_block_{sk}"):
                                 st.session_state[f"confirm_block_{sk}"] = False
@@ -344,14 +345,22 @@ if page == "My alerts":
                                         Payload=json.dumps(payload)
                                     )
                                     result = json.loads(response["Payload"].read().decode())
-                                    st.success(f"Revoked successfully: {result}")
+                                    st.session_state[f"result_{sk}"] = ("success", f"Revoked successfully: {result}")
                                 except Exception as e:
-                                    st.error(f"Failed to revoke: {e}")
+                                    st.session_state[f"result_{sk}"] = ("error", f"Failed to revoke: {e}")
                                 st.session_state[f"confirm_revoke_{sk}"] = False
+                                st.rerun(scope="fragment")
                         with c2:
                             if st.button("❌ Cancel", key=f"cancel_revoke_{sk}"):
                                 st.session_state[f"confirm_revoke_{sk}"] = False
                                 st.rerun()
+
+                # Show the last action result (persists across auto-refreshes)
+                if f"result_{sk}" in st.session_state:
+                    kind, msg = st.session_state[f"result_{sk}"]
+                    (st.success if kind == "success" else st.error)(msg)
+            else:
+                st.caption(f"Prevention actions are available for events scoring {ALERT_THRESHOLD} or higher.")
     # Execute the fragment
     display_alerts_table()
 
