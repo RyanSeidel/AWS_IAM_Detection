@@ -242,6 +242,56 @@ script isn't in the repo yet.
 
 ---
 
+## Try it in your own AWS account (CloudShell)
+
+For classmates or graders: deploys the whole project into **your own** AWS
+account from [AWS CloudShell](https://console.aws.amazon.com/cloudshell/home?region=us-east-1)
+(us-east-1). CloudShell already has the AWS CLI, Python and git, and is already
+logged in, so nothing needs installing on your laptop.
+
+You need a login that can create IAM roles and users (an admin user, or root
+for a personal test account). Restricted lab accounts may not work.
+
+Signed in as root? Expect some root alerts on the dashboard during setup and
+cleanup: root activity always alerts, by design. Pick `dana-test` in the
+identity dropdown to follow the attack.
+
+```bash
+git clone -b test https://github.com/RyanSeidel/AWS_IAM_Detection.git
+cd AWS_IAM_Detection
+bash demo/quickstart.sh you@example.com
+```
+
+About 8 to 10 minutes. The script:
+
+- installs Terraform and boto3 if missing
+- keeps Terraform state in this folder (`main/backend_override.tf`), not the team's S3 bucket
+- deploys the detector, the dashboard and the `dana-test` demo user
+- gives dana a real access key (AWS profile `dana-test`) and waits for the dashboard
+- prints the dashboard link and the login
+
+Then attack with **real AWS calls as dana-test** (a real IAM user with a real
+key; no simulator or fake history). Pick `dana-test` in the dashboard's identity
+dropdown and open **My alerts** (about 1 to 5 minutes). Dana has no baseline,
+so she scores as an unknown identity (+40) plus each risky call:
+
+```bash
+# Steal a secret (Credential Access): 80
+aws ssm get-parameter --name /demo/db-password --with-decryption --region eu-west-1 --profile dana-test
+# Backdoor key (Persistence): 80
+aws iam create-access-key --user-name dana-test --profile dana-test
+# Blocked attempt: AccessDenied is expected, it still alerts at 105
+aws iam create-user --user-name backdoor-admin --profile dana-test
+```
+
+**When you're done, remove everything** so nothing keeps costing money:
+
+```bash
+bash demo/cleanup.sh you@example.com
+```
+
+---
+
 ## Repository layout
 
 | Path | What it is |
