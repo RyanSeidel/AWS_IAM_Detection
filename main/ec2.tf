@@ -20,11 +20,15 @@ resource "aws_iam_role_policy" "dashboard_policy" {
       {
         Effect = "Allow"
         Action = ["dynamodb:Scan", "dynamodb:Query"]
-        # Wildcard account IDs to prevent ARN mismatches causing AccessDenied
         Resource = [
           "arn:aws:dynamodb:us-east-1:*:table/insider-threat-alerts",
           "arn:aws:dynamodb:us-east-1:*:table/insider-threat-baseline"
         ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["lambda:InvokeFunction"]
+        Resource = "arn:aws:lambda:us-east-1:*:function:insider-threat-quarantine"
       }
     ]
   })
