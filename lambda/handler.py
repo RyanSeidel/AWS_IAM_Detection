@@ -9,6 +9,7 @@ from boto3.dynamodb.conditions import Key
 sns_client = boto3.client("sns")
 dynamodb = boto3.resource("dynamodb")
 
+
 TOPIC_ARN = os.environ["ALERT_TOPIC"]
 TABLE_NAME = os.environ["BASELINE_TABLE"]
 ALERTS_TABLE_NAME = os.environ.get("ALERTS_TABLE")
@@ -319,6 +320,7 @@ def handler(event, context):
         )    
     # 3. Decision Engine: Alert via SNS if threshold is breached
     if score >= ALERT_THRESHOLD:
+
         mitre_string = ", ".join(mitre_tactics) if mitre_tactics else "N/A"
         explanations = "\n- ".join(anomalies)
         
