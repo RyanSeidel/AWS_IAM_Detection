@@ -1,442 +1,282 @@
 # AWS IAM Insider Threat Detection
 
-A group project for Cloud Computing. It watches every AWS API call in the
-account and alerts when an identity does something **unusual for that specific
-identity**, not just something on a known-bad list.
+**InsiderWatch** watches every AWS API call in an account and alerts when an
+identity does something **unusual for that specific identity**, not just
+something on a known-bad list. Built with Terraform and Python for our Cloud
+Computing group project.
 
-A stolen access key and a malicious insider look identical in the logs: both
-are a valid identity making valid calls. What gives them away is behaving
-differently from that identity's own history. So we baseline each user and
-role, score every risky call against its baseline, and email an explained alert
+A stolen access key and a malicious insider look the same in the logs: a valid
+identity making valid calls. What gives them away is behaving differently from
+that identity's own history. So InsiderWatch learns each user's normal
+behaviour, scores every risky call against it, and sends an explained alert
 when the score crosses a threshold.
+
+**Highlights**
+
+- Behavioural scoring per identity: new API, region, hour and IP address
+- High-risk APIs mapped to MITRE ATT&CK tactics, shown in every alert
+- Covers every enabled region, with one detector in us-east-1
+- Email alerts plus a web dashboard with login, alert history and a what-if score calculator
+- One-click **Block** and **Revoke** of a suspicious IAM user from the dashboard
+- Self-protection: tampering with the detector, its rules or its tables alerts on its own
+- Runs at about **$0** on the AWS free tier
 
 ---
 
-## Project phases
+## Contents
 
-| Phase | What | Status |
-|---|---|---|
-| 1. Foundation | Terraform state backend; multi-region CloudTrail trail and log bucket | Done |
-| 2. Detection pipeline | EventBridge rule, cross-region forwarding to us-east-1, Lambda, SNS email alerts | Done |
-| 3. Behavioral detection | Per-identity baselines (`seed_baseline.py`); scoring on new API, region, hour and IP; MITRE ATT&CK mapping; secret reads and exfiltration APIs | Done |
-| 4. Decoy data | A "crown jewels" decoy bucket with CloudTrail data events, so stolen files show up as `s3:GetObject` | Done |
-| 5. Attack simulation | A `dana-test` script that replays a stolen-credential attack step by step and shows each score ([see below](#demo-flow-phase-5)) | Done |
-| 6. Alert dashboard | A cleaner view of alerts than raw emails: scores, identities, regions, tactics and reasons in one place | Not started |
+- [Try it in your own AWS account](#try-it-in-your-own-aws-account)
+- [How it works](#how-it-works)
+- [Scoring](#scoring)
+- [The dashboard](#the-dashboard)
+- [Self-protection and data recovery](#self-protection-and-data-recovery)
+- [Team setup (shared account)](#team-setup-shared-account)
+- [Testing](#testing)
+- [Cost](#cost)
+- [Repository layout](#repository-layout)
+- [Known limitations](#known-limitations)
+- [Team and workflow](#team-and-workflow)
 
-Each phase builds on the one before. Phase 3's Lambda already scores
-`s3:GetObject`, so Phase 4 needs no Lambda changes. Phase 5 reads the Lambda's
-JSON log lines (`score`, `alerted`, `reasons`), and Phase 6 can display the same
-fields.
+---
+
+## Try it in your own AWS account
+
+The fastest way to see it working. This deploys the whole project into **your
+own** AWS account from
+[AWS CloudShell](https://console.aws.amazon.com/cloudshell/home?region=us-east-1),
+which already has the AWS CLI, Python and git and is already signed in. Nothing
+needs installing on your laptop.
+
+**You need:** a login that can create IAM roles and users (an admin user, or
+root on a personal test account). Restricted lab accounts may not work.
+
+### 1. Deploy (about 8 to 10 minutes)
+
+In the AWS console, switch to **us-east-1 (N. Virginia)**, open CloudShell, and run:
+
+```bash
+git clone https://github.com/RyanSeidel/AWS_IAM_Detection.git
+cd AWS_IAM_Detection
+bash demo/quickstart.sh you@example.com
+```
+
+The script:
+
+- installs Terraform and boto3 if missing
+- keeps Terraform state in this folder, never in our team's S3 bucket
+- deploys the detector, the dashboard and `dana-test`, a real IAM user who plays the insider
+- gives dana a real access key (AWS profile `dana-test`) and waits for the dashboard
+- prints the dashboard link, the login and the attack commands
+
+Click the link in the "AWS Notification - Subscription Confirmation" email if
+you also want alert emails.
+
+### 2. Log in to the dashboard
+
+Open the printed link. Username `admin@insider.com`, with the temporary password
+the script prints. You'll be asked to set your own.
+
+> Signed in as root? You'll already see some root alerts from the setup. Root
+> activity always alerts, by design.
+
+### 3. Attack
+
+These are **real AWS calls** made with dana's real key, so they go through the
+real pipeline. Dana has no history yet, so she scores as an unknown identity
+(+40) plus each risky call:
+
+```bash
+# Steal a secret (Credential Access): 80
+aws ssm get-parameter --name /demo/db-password --with-decryption --region eu-west-1 --profile dana-test
+
+# Create a backdoor key (Persistence): 80
+aws iam create-access-key --user-name dana-test --profile dana-test
+
+# Try something she isn't allowed to: AccessDenied is expected, and it still alerts at 105
+aws iam create-user --user-name backdoor-admin --profile dana-test
+```
+
+Within about 1 to 5 minutes, pick `dana-test` in the dashboard's identity
+dropdown and open **My alerts**. From there you can **Block** her with one click.
+
+### 4. Clean up
+
+```bash
+bash demo/cleanup.sh you@example.com
+```
+
+This removes everything, so nothing keeps running or costing money.
 
 ---
 
 ## How it works
 
 ```mermaid
-flowchart TD
-    subgraph BUILD["Baseline builder: helpers/seed_baseline.py (run before detection)"]
-        B1["1. Get enabled regions"] --> B2["2. Pull up to 90 days of<br/>CloudTrail history per region"]
-        B2 --> B3["3. Resolve identity<br/>(IAM user or role ARN)"]
-        B3 --> B4["4. Build one profile per identity<br/>apis · regions · hours"]
-    end
-
-    B4 --> DDB[("DynamoDB<br/>insider-threat-baseline<br/>facet = profile")]
-
+flowchart LR
     subgraph REGIONS["Every other enabled region"]
-        R1["API call"] --> CT1["CloudTrail"] --> FWD["Forwarding rule<br/>(same filter)"]
+        R1["API call"] --> CT1["CloudTrail"] --> FWD["Forwarding rule"]
     end
 
     subgraph HOME["us-east-1"]
         R0["API call"] --> CT0["CloudTrail<br/>multi-region trail"] --> BUS["Default event bus"]
-        BUS --> RULE{"EventBridge rule<br/>mutating or secret reads · human"}
-        RULE -- match --> LAMBDA["Lambda detector<br/>lambda/handler.py"]
-        DDB -- profile lookup --> LAMBDA
+        BUS --> RULE{"EventBridge rule<br/>risky calls only"}
+        RULE --> LAMBDA["Detector Lambda<br/>lambda/handler.py"]
+        BASE[("Baseline table<br/>what's normal")] --> LAMBDA
         LAMBDA --> SCORE{"Score ≥ 75?"}
-        SCORE -- yes --> SNS["SNS email alert<br/>with reasons + MITRE tactic"]
-        SCORE -- no --> LOG["Logged only<br/>alerted: false"]
+        SCORE -- yes --> SNS["Email alert<br/>reasons + MITRE tactic"]
+        SCORE -- yes --> ALERTS[("Alerts table")]
+        ALERTS --> DASH["Dashboard<br/>EC2 + Cognito login"]
+        DASH -- Block / Revoke --> Q["Quarantine Lambda"]
+        WATCH["Watchdog rules"] -- tampering --> SNS
     end
 
-    FWD -->|events:PutEvents| BUS
-    CT0 -.-> S3[("S3 log bucket<br/>all regions · 30-day retention")]
-    CT1 -.-> S3
+    FWD --> BUS
 ```
 
-1. **CloudTrail** records every management API call. The trail is set to
-   `is_multi_region_trail = true`, so every region is logged into one S3 bucket.
-2. **EventBridge** filters for calls worth scoring:
-   - mutating calls (`readOnly = false`), plus a short list of sensitive reads
-     (secrets, and S3 object reads where data events are enabled);
-   - made by an IAM user, assumed role or the root user, not by an AWS service
-     acting on its own (no `invokedBy`);
-   - not from CloudWatch Logs, which would make the Lambda trigger itself.
-3. **The Lambda** looks up the identity's profile in DynamoDB, adds up a risk
-   score, and decides whether to alert.
-4. **SNS** emails the alert, explaining in plain language why it fired.
+1. **CloudTrail** records every management API call in every region into one S3 bucket.
+2. **EventBridge** passes on only the calls worth scoring:
+   - mutating calls, a short list of sensitive reads (secrets, decoy object reads),
+     denied calls (`AccessDenied`, `UnauthorizedOperation`) and console sign-ins;
+   - made by a person or role, not by an AWS service acting on its own.
+3. **The detector Lambda** looks up the identity's baseline, adds up a risk
+   score, and decides whether to alert. If the baseline lookup fails, it
+   alerts anyway (it *fails closed*).
+4. **Alerts** go out by email through SNS, explaining in plain language why
+   they fired, and are saved to the alerts table for the dashboard.
 
-### Multi-region: one Lambda for every region
+**Multi-region.** An EventBridge rule can't invoke a Lambda in another region,
+but it can forward events to another region's event bus. So every enabled
+region gets a small forwarding rule that sends matching events to us-east-1.
+There is one detector, one scoring path and one alert topic. Regions are
+discovered automatically ([main/forwarding.tf](main/forwarding.tf)).
 
-CloudTrail delivers each event to EventBridge **in the region where the call
-happened**, and an EventBridge rule can't invoke a Lambda in another region.
-It *can* send events to another region's event bus. So each enabled region
-outside us-east-1 gets a small forwarding rule, using the same filter, that sends
-matches to the us-east-1 default bus:
+### The baseline: what's normal for each identity
 
-```
-eu-west-1:  CloudTrail event → forwarding rule ─┐
-us-west-2:  CloudTrail event → forwarding rule ─┼→ us-east-1 default bus → existing rule → the one Lambda → SNS
-us-east-1:  CloudTrail event ───────────────────┘
-```
+[helpers/seed_baseline.py](helpers/seed_baseline.py) reads up to 90 days of
+CloudTrail history and stores a profile per identity: the APIs, regions, UTC
+hours and IP addresses it normally uses. It runs automatically after
+`terraform apply`, and can be re-run any time to learn new normal activity.
 
-- There is one detector, one scoring path and one SNS topic.
-- us-east-1 has no forwarding rule, so forwarded events can't loop.
-- Enabled regions are discovered automatically ([main/forwarding.tf](main/forwarding.tf)).
-- IAM is a global service, so IAM changes arrive in us-east-1 no matter where the caller is.
-
----
-
-## What the baseline does
-
-The baseline is a **record of each identity's normal behaviour**. Every new
-event is compared against it, so the detector can tell "normal for them" from
-"out of character". `helpers/seed_baseline.py` builds it from the last 90 days
-of CloudTrail history, and the Lambda reads it for every event.
-
-**Example.** The baseline for `admin.me`:
-
-| What | Normal for admin.me |
-|---|---|
-| APIs | `s3:CreateBucket`, `dynamodb:CreateTable`, `lambda:UpdateFunctionCode` … |
-| Regions | `us-east-1` |
-| Hours (UTC) | 13–23 (daytime, US Central) |
-| IPs | `198.51.100.7` (home) |
-
-Two events arrive, both using admin.me's valid key:
+**Example.** Two events, both using `admin.me`'s valid key:
 
 | | admin.me, normally | Someone with a stolen key |
 |---|---|---|
-| Action | `s3:CreateBucket` | `ssm:GetParameter` (reading a secret) |
-| Region | us-east-1 ✓ | eu-west-1 ✗ new region, +35 |
-| Time | 3pm ✓ | 4am ✗ unusual hour, +25 |
-| IP | home ✓ | unknown ✗ new IP, +25 |
-| API | used before ✓ | never used ✗ new API +20, high-risk +40 |
-| **Score** | **0: nothing happens** | **145: alert email** |
+| Action | `s3:CreateBucket` | `ssm:GetParameter` (reading a secret): high-risk +40 |
+| API | used before ✓ | never used ✗ +20 |
+| Region | us-east-1 ✓ | eu-west-1 ✗ new region +75 |
+| Time | 3 pm ✓ | 4 am ✗ unusual hour +25 |
+| IP | home ✓ | unknown ✗ new IP +25 |
+| **Score** | **0: nothing happens** | **185: alert** |
 
-**Why this matters:** both events come from a real, valid identity, so a list of
-"bad API calls" can't tell them apart. The baseline can, because it knows what
-*this particular person* normally does. That's how the project catches stolen
-credentials and insiders.
-
-### First seed run (October 1, 2026)
-
-What `seed_baseline.py` recorded from our account's CloudTrail history:
-
-| Identity | Regions | Hours (UTC) | IPs | APIs |
-|---|---|---|---|---|
-| `user/admin.me` | 17 (every region) | 0, 1, 18, 19, 20, 23 | 10 (4 are IPv6) | 236 |
-| `user/shadab.dev` | us-east-1, us-east-2 | 22 only | 3 | 17 |
-| `user/rency.dev` | us-east-1, us-east-2 | 19 only | 1 | 15 |
-| `role/insider-threat-detector` | us-east-1 | 1, 19, 20 | 17 (AWS Lambda IPs) | 2 |
-| 5 AWS service and demo roles | various | various | various | mostly read-only lists |
-
-`yael.dev` has no baseline yet (no recorded activity in the last 90 days).
-
-Issues this run revealed:
-- **admin.me's region list is polluted.** The script learned from read-only
-  calls too, including its own `LookupEvents` in every region, so every region
-  looks normal and the new-region signal can't fire for that user. *Fixed:* the
-  script now learns only from events the detector scores (mutating calls plus
-  secret reads, no AWS-service or CloudWatch Logs calls), and removes profiles
-  left over from earlier runs.
-- **IPv6 addresses rotate.** A home network gets new IPv6 addresses over time,
-  which would trip the new-IP signal on normal activity. *Fixed:* IPv6 is now
-  compared by network (`/64`) instead of exact address; IPv4 stays exact.
-- **Lambda API names carry a version suffix** (`CreateFunction20150331`), so
-  `lambda:CreateFunction` on the high-risk list never matched. *Fixed:* the
-  handler and seed script now strip these suffixes.
-- **Teammate profiles are thin.** One active hour each, so the hour signal will
-  fire often until they have more history.
-
-Without a baseline, every identity counts as unknown. The behavioural checks
-(new API, region, hour and IP) can't run, so only the fixed high-risk rules
-apply. Run the seed script after deploying, and re-run it now and then so new
-normal activity is learned (see [Setup](#4-build-the-baselines)).
+A list of "bad API calls" can't tell these apart, because both come from a
+real, valid identity. The baseline can.
 
 ---
 
 ## Scoring
 
-Every event that reaches the Lambda gets a score. **75 or more sends an alert.**
+Every event that reaches the detector gets a score. **75 or more sends an alert.**
 
 | The event is… | Points |
 |---|---|
+| In a region this identity has never used | +75 (alerts on its own) |
 | A high-risk API (see below) | +40 |
-| Logging tampering (`StopLogging`, `DeleteTrail`, `UpdateTrail`, `PutEventSelectors`) | +75 (alerts on its own) |
-| An API this identity has never called | +20 |
-| In a region this identity has never used | +35 |
+| From an identity with no baseline | +40 |
+| Console sign-in without MFA | +40 |
+| Security group opened to `0.0.0.0/0` or `::/0` | +35 (on top of the high-risk API) |
 | At a UTC hour this identity is never active | +25 |
 | From an IP address this identity has never used | +25 |
-| From an identity with no profile at all | +40 |
-| Any activity by the root user | raised to at least 75 |
-| Security group ingress opened to `0.0.0.0/0` or `::/0` | +35 (on top of the high-risk API; alerts on its own) |
+| Denied (`AccessDenied`, `UnauthorizedOperation`) | +25 |
+| Failed console sign-in | +25 |
+| An API this identity has never called | +20 |
+| Tampering with logging or with the detector itself | +75 (alerts on its own) |
+| Any activity by the root user | raised to at least 75 (always alerts) |
 
-
-**High-risk APIs, by MITRE ATT&CK tactic:**
+**High-risk APIs, by MITRE ATT&CK tactic**
 
 | Tactic | APIs |
 |---|---|
 | Privilege Escalation | `iam:AttachUserPolicy`, `PutUserPolicy`, `AttachRolePolicy`, `PutRolePolicy`, `CreatePolicyVersion`, `SetDefaultPolicyVersion`, `AddUserToGroup`, `UpdateAssumeRolePolicy` |
 | Persistence | `iam:CreateAccessKey`, `CreateLoginProfile`, `UpdateLoginProfile`, `CreateUser`, `lambda:CreateFunction` |
-| Defense Evasion | `iam:DeactivateMFADevice`, `ec2:AuthorizeSecurityGroupIngress` (extra +35 if the rule is `0.0.0.0/0` or `::/0`). Logging tampering is listed above and scores +75. |
 | Credential Access | `ssm:GetParameter`, `ssm:GetParameters`, `secretsmanager:GetSecretValue` |
+| Defense Evasion | `iam:DeactivateMFADevice`, `ec2:AuthorizeSecurityGroupIngress` |
+| Defense Evasion, +75 | `cloudtrail:StopLogging`, `DeleteTrail`, `UpdateTrail`, `PutEventSelectors`, `guardduty:DeleteDetector`, `config:StopConfigurationRecorder`, `kms:ScheduleKeyDeletion`, and changes to the detector's own rules, Lambda, alert topic or tables |
 | Exfiltration | `s3:PutBucketPolicy`, `PutBucketAcl`, `PutBucketReplication`, `DeleteBucketPublicAccessBlock`, `ec2:ModifySnapshotAttribute`, `ModifyImageAttribute`, `rds:ModifyDBSnapshotAttribute` |
-| Collection | `s3:GetObject` (only for buckets with CloudTrail data events enabled) |
+| Collection | `s3:GetObject` (only for buckets with CloudTrail data events turned on, such as a decoy bucket) |
 | Resource Hijacking | `ec2:RunInstances` |
 
-Most reads are filtered out before reaching the Lambda. The exceptions are
-reading secrets (`GetParameter`, `GetParameters`, `GetSecretValue`) and
-`GetObject`, which the EventBridge rule lets through using an `$or` filter.
+The full list lives in `HIGH_RISK_APIS` in [lambda/handler.py](lambda/handler.py).
 
-- **Unknown identities.** A brand-new user (for example, a backdoor account an
-  attacker created) has no history to compare against. It still scores 40, so
-  any high-risk call it makes alerts.
-- **Failure mode.** If the DynamoDB lookup fails, the event alerts rather than
-  being silently dropped (it *fails closed*).
-- **MITRE ATT&CK.** Each high-risk API is mapped to a tactic (Persistence,
-  Privilege Escalation, Defense Evasion, Resource Hijacking, Execution), which
-  appears in the alert email.
+---
 
-### Tested scenarios
+## The dashboard
 
-The handler was run against mocked AWS clients in 15 scenarios, and all passed:
+A Streamlit app (Docker image `shadab998/insiderwatch:latest`) on a small EC2
+server, behind an Amazon Cognito login. Get its address with
+`terraform output dashboard_url`.
 
-| Scenario | Alerts? |
+| Page | What it shows |
 |---|---|
-| Known user, normal activity | No |
-| Known user, `StopLogging` | Yes |
-| Known user, new API at an unusual hour | No |
-| Known user, high-risk API plus anomalies | Yes |
-| Unknown user, normal call | No |
-| Unknown user, `CreateAccessKey` | Yes |
-| DynamoDB error | Yes |
-| Known user, new IP only (25) | No |
-| Known user, new IP + new region (60) | No |
-| Source IP is a hostname, not an IP | No (no IP signal) |
-| Known user, `GetParameter` + new IP + new API (85) | Yes |
-| Known user, `PutBucketPolicy` + new region + new IP + new API (120) | Yes |
-| Root user, `CreateAccessKey` (80) | Yes |
-| Root user, routine call that matches its profile (75) | Yes |
-| Unknown user, `iam:CreateUser` (80) | Yes |
+| **My alerts** | Every alert: score, identity, API, region, MITRE tactic and the reasons. **Block** and **Revoke** buttons, each with a confirmation step |
+| **What's normal for me** | The selected identity's baseline: usual APIs, regions, hours and IPs |
+| **What triggers an alert** | A what-if calculator that scores an imaginary call against the live baseline, plus the point values |
 
----
+Pick **All Profiles** or one identity in the sidebar to filter every page.
 
-## Demo flow (Phase 5)
+**Block and Revoke.** The dashboard calls a separate quarantine Lambda
+([lambda/quarantine.py](lambda/quarantine.py)):
 
-The live demo uses a test identity, `dana-test`, to walk through an attack one
-step at a time and show how each step scores. This is Phase 5; the simulator
-script isn't in the repo yet.
+- **Block** attaches a deny-all policy to the IAM user and deactivates their access keys.
+- **Revoke** removes that policy and reactivates the keys.
+- Both send an email. The root user and the detector itself can never be blocked.
 
-![Baseline builder and attack simulation flow](images/dana-test-full-flow.png)
-
-> The footnote in this diagram is out of date: the "identity with no profile"
-> check (+40) is already in the Lambda.
-
----
-
-## Try it in your own AWS account (CloudShell)
-
-For classmates or graders: deploys the whole project into **your own** AWS
-account from [AWS CloudShell](https://console.aws.amazon.com/cloudshell/home?region=us-east-1)
-(us-east-1). CloudShell already has the AWS CLI, Python and git, and is already
-logged in, so nothing needs installing on your laptop.
-
-You need a login that can create IAM roles and users (an admin user, or root
-for a personal test account). Restricted lab accounts may not work.
-
-Signed in as root? Expect some root alerts on the dashboard during setup and
-cleanup: root activity always alerts, by design. Pick `dana-test` in the
-identity dropdown to follow the attack.
+**Login.** Username `admin@insider.com`. On a new deployment, the first login
+uses the temporary password in [main/cognito.tf](main/cognito.tf) and asks you
+to set your own. Only an admin can create users (no self sign-up). To reset a
+forgotten password:
 
 ```bash
-git clone -b test https://github.com/RyanSeidel/AWS_IAM_Detection.git
-cd AWS_IAM_Detection
-bash demo/quickstart.sh you@example.com
+aws cognito-idp admin-set-user-password --user-pool-id <pool-id> \
+  --username admin@insider.com --password '<new password>' --permanent
 ```
 
-About 8 to 10 minutes. The script:
-
-- installs Terraform and boto3 if missing
-- keeps Terraform state in this folder (`main/backend_override.tf`), not the team's S3 bucket
-- deploys the detector, the dashboard and the `dana-test` demo user
-- gives dana a real access key (AWS profile `dana-test`) and waits for the dashboard
-- prints the dashboard link and the login
-
-Then attack with **real AWS calls as dana-test** (a real IAM user with a real
-key; no simulator or fake history). Pick `dana-test` in the dashboard's identity
-dropdown and open **My alerts** (about 1 to 5 minutes). Dana has no baseline,
-so she scores as an unknown identity (+40) plus each risky call:
-
-```bash
-# Steal a secret (Credential Access): 80
-aws ssm get-parameter --name /demo/db-password --with-decryption --region eu-west-1 --profile dana-test
-# Backdoor key (Persistence): 80
-aws iam create-access-key --user-name dana-test --profile dana-test
-# Blocked attempt: AccessDenied is expected, it still alerts at 105
-aws iam create-user --user-name backdoor-admin --profile dana-test
-```
-
-**When you're done, remove everything** so nothing keeps costing money:
-
-```bash
-bash demo/cleanup.sh you@example.com
-```
+**High availability (optional).** `-var="enable_alb_asg=true"` puts the
+dashboard behind a load balancer with an Auto Scaling group, which replaces the
+server automatically if it fails. In this mode, port 8501 only accepts traffic
+from the load balancer. Off by default because it costs extra (about $16 to $22
+a month).
 
 ---
 
-## Repository layout
+## Self-protection and data recovery
 
-| Path | What it is |
-|---|---|
-| [bootstrap/main.tf](bootstrap/main.tf) | S3 bucket for shared Terraform state. Run once. |
-| [main/main.tf](main/main.tf) | Multi-region CloudTrail trail and its S3 log bucket |
-| [main/eventbridge.tf](main/eventbridge.tf) | Filter rule, Lambda, and the Lambda's IAM role |
-| [main/forwarding.tf](main/forwarding.tf) | Per-region forwarding rules to us-east-1 |
-| [main/dynamodb.tf](main/dynamodb.tf) | Baseline table (`identity` + `facet`) |
-| [main/sns.tf](main/sns.tf) | Alert topic and email subscription |
-| [lambda/handler.py](lambda/handler.py) | Scoring and alerting logic |
-| [helpers/seed_baseline.py](helpers/seed_baseline.py) | Builds baselines from CloudTrail history |
-| [Updates/](Updates/) | Build log, detection guide, team notes |
+An attacker's first move is often to switch off the alarm, so the detector
+watches itself.
 
----
+- **Tampering alerts.** Disabling or deleting the detector's EventBridge rules,
+  changing or deleting its Lambda, unsubscribing the alert email, or deleting
+  or changing its DynamoDB tables or their backups all score +75.
+- **Watchdog rules.** `insider-threat-watchdog` and
+  `insider-threat-watchdog-tables` email the alert topic **directly**, so these
+  alerts arrive even if the detector Lambda itself was broken.
+- **No SSH.** Port 22 is closed on the dashboard server, which is rebuilt from
+  its startup script instead.
 
-## Setup
-
-Each teammate needs their **own IAM user and access key**. Sharing credentials
-merges everyone's behaviour into one baseline, which defeats the project.
-
-### 1. Install the tools (Windows PowerShell, not as Administrator)
-
-```powershell
-winget install HashiCorp.Terraform
-winget install Amazon.AWSCLI
-pip install boto3
-```
-
-Reopen PowerShell so PATH refreshes, then check with `terraform -version` and
-`aws --version`.
-
-### 2. Configure credentials
-
-```powershell
-aws configure                 # key id, secret, us-east-1, json
-aws sts get-caller-identity   # ARN must end in :user/your-name, never :root
-```
-
-### 3. Deploy
-
-The state bucket only needs creating once per account:
-
-```powershell
-cd bootstrap
-terraform init
-terraform apply
-```
-
-Then the detection pipeline:
-
-```powershell
-cd ../main
-terraform init
-terraform apply -var="alert_email=you@example.com"
-```
-
-AWS sends a confirmation email to that address. **Click the link**, or no
-alerts are delivered.
-
-### 4. Build the baselines
-
-```powershell
-python helpers/seed_baseline.py
-aws dynamodb scan --table-name insider-threat-baseline --query "Count"
-```
-
-Until this runs, every identity counts as unknown. Profiles built before the
-source-IP signal was added have no IPs, so re-run it to turn that signal on. The script takes several
-minutes because CloudTrail history lookups are rate-limited. Re-run it now and
-then so new normal activity is learned; the Lambda never updates baselines
-itself.
-
----
-
-## Testing
-
-Trigger an event in another region (this also tests forwarding) and watch the
-Lambda:
-
-```powershell
-aws s3api create-bucket --bucket test-detect-euw1-<account-id> --region eu-west-1 --create-bucket-configuration LocationConstraint=eu-west-1
-aws s3api delete-bucket --bucket test-detect-euw1-<account-id> --region eu-west-1
-aws logs tail /aws/lambda/insider-threat-detector --since 2m --filter-pattern "identity" --region us-east-1
-```
-
-Each log line shows the identity, API, score, and whether it alerted. Allow
-10–20 seconds for events to arrive. See
-[Updates/detectionguide.md](Updates/detectionguide.md) for how to change what
-gets detected.
-
----
-
-## Cost
-
-The project is designed to run at **$0**:
-
-- Management events only. Never enable CloudTrail data events or Insights.
-- One trail. A second trail in the same region is billed.
-- `AES256` encryption everywhere, never `aws:kms` ($1/month per key).
-- DynamoDB at 1 read / 1 write capacity unit, inside the free tier.
-- 7-day log retention on the Lambda's log group.
-- Forwarded cross-region events cost about $1 per million, so effectively free.
-- No VPC for the Lambda (that would need a NAT gateway, about $33/month).
-
-**On `terraform destroy`:** it deletes the baseline table and its data, all
-CloudTrail logs, and the SNS subscription. After rebuilding, you have to re-run
-the seed script and re-confirm the email. Since the stack costs nothing while
-idle, leaving it running is usually simpler.
-
----
-
-## Data protection and recovery
-
-The detector depends on its two DynamoDB tables: `insider-threat-baseline`
-(what "normal" is) and `insider-threat-alerts` (the dashboard's history).
-Deleting the baseline table is a bypass, because every identity then counts
-as "unknown" (+40) instead of being scored against its profile.
-
-**Detection (always on).** Deleting either table, turning off its deletion
-protection or backups (`UpdateTable`, `UpdateContinuousBackups`), deleting a
-backup, or changing its resource policy scores 75 (Defense Evasion) and
-alerts. The `insider-threat-watchdog-tables` rule also emails the SNS topic
-directly, so the alert arrives even if the Lambda is down.
-
-**Protection (opt-in).** Off by default, like the ALB/ASG option, so nobody
-reusing this project pays for it unknowingly:
+**Data protection (optional).** Off by default, so nobody reusing this project
+pays for it without knowing:
 
 ```bash
 terraform apply -var="alert_email=you@example.com" -var="protect_data=true"
 ```
 
-This turns on, for both tables:
-- **deletion protection**: `DeleteTable` fails until protection is turned off
-- **point-in-time recovery**: continuous backups, restorable to any second
-
-To tear down with it on, first apply with `-var="protect_data=false"`, then
-run `terraform destroy`. Applying the switch itself sends an `UpdateTable`
-alert; that one is expected.
+This turns on **deletion protection** and **point-in-time recovery** for both
+tables (`insider-threat-baseline` and `insider-threat-alerts`). To tear down
+with it on, apply with `-var="protect_data=false"` first, then destroy.
 
 **Restoring after an attack** (needs `protect_data=true` beforehand):
 
-- *Table deleted:* DynamoDB keeps a system backup named
-  `<table>$DeletedTableBackup` for 35 days. Find it and restore it under the
-  original name, then run `terraform apply` to re-apply our settings:
+- *Table deleted:* AWS keeps a backup named `<table>$DeletedTableBackup` for 35
+  days. Restore it under the original name, then run `terraform apply`:
 
   ```bash
   aws dynamodb list-backups --table-name insider-threat-alerts --backup-type SYSTEM
@@ -444,8 +284,8 @@ alert; that one is expected.
       --target-table-name insider-threat-alerts --backup-arn <BackupArn from above>
   ```
 
-- *Rows deleted or edited:* restore a copy from just before the attack (a
-  restore always creates a new table), check it, then copy the rows back:
+- *Rows deleted or edited:* restore a copy from just before the attack (this
+  always creates a new table), check it, then copy the rows back:
 
   ```bash
   aws dynamodb restore-table-to-point-in-time \
@@ -454,40 +294,181 @@ alert; that one is expected.
       --restore-date-time 2026-11-07T20:00:00Z
   ```
 
-- *Baselines only:* they can also be rebuilt without a backup:
-  `python3 helpers/seed_baseline.py --from-file fake_events.json --merge-cloudtrail`.
-  Alerts cannot be rebuilt this way, which is why backups matter most for them.
-
-**Dashboard server.** There is no SSH access: port 22 is closed and the
-instance is rebuilt from `user_data`. With `enable_alb_asg=true`, port 8501
-only accepts traffic from the load balancer.
-
-## Known limitations
-
-- **Shared roles share a baseline.** Assumed-role sessions resolve to the role
-  ARN, so people sharing a role share one profile.
-- **Baselines are static.** They're a snapshot from the last seed run.
-- **The seed script learns from whatever happened.** Activity in the last 90
-  days, including test activity, counts as normal.
+- *Baselines only:* these can also be rebuilt from CloudTrail by re-running
+  `seed_baseline.py`. Alerts can't, which is why backups matter most for them.
 
 ---
 
-## Git workflow
+## Team setup (shared account)
+
+For the four of us working in the team account, where Terraform state is
+shared in S3. Everyone else should use [Try it in your own AWS account](#try-it-in-your-own-aws-account).
+
+Each teammate needs their **own IAM user and access key**. Sharing credentials
+mixes everyone's behaviour into one baseline, which defeats the project.
+
+**1. Install the tools**
 
 ```bash
-git branch                          # which branch am I on?
-git checkout your-branch-name       # switch to your branch
-git pull origin your-branch-name    # get the latest version of it
-
-# Save and push your work
-git add .
-git commit -m "Clear description"
-git push origin your-branch-name
-
-# Bring another branch's work into yours
-git pull origin other-branch-name
-
-# See branches
-git branch -a                       # local + remote
-git log origin/ryan-dev --oneline -10
+# macOS
+brew install terraform awscli
+python3 -m pip install boto3
 ```
+
+```powershell
+# Windows PowerShell (not as Administrator), then reopen PowerShell
+winget install HashiCorp.Terraform
+winget install Amazon.AWSCLI
+pip install boto3
+```
+
+**2. Configure credentials**
+
+```bash
+aws configure                 # key id, secret, us-east-1, json
+aws sts get-caller-identity   # must end in :user/your-name, never :root
+```
+
+**3. Deploy.** The state bucket is created once per account (already done for
+the team account):
+
+```bash
+cd bootstrap && terraform init && terraform apply
+```
+
+Then the detector and dashboard:
+
+```bash
+cd main
+terraform init
+terraform plan  -var="alert_email=you@example.com"
+terraform apply -var="alert_email=you@example.com"
+```
+
+Always read the plan before applying, and stop if it wants to destroy something
+unexpected. Tell the team before you apply or destroy: we all share one stack.
+Click the link in the confirmation email, or no alert emails are delivered.
+
+**Options:**
+
+| Variable | Default | What it does |
+|---|---|---|
+| `alert_email` | (required) | Where alerts are emailed |
+| `demo_user` | `false` | Creates `dana-test` and the decoy secret for live demos |
+| `protect_data` | `false` | Deletion protection + point-in-time recovery for both tables |
+| `enable_alb_asg` | `false` | Load balancer + Auto Scaling for the dashboard |
+
+**4. Baselines.** `terraform apply` seeds them automatically. To refresh them
+later (for example after new normal activity):
+
+```bash
+python3 helpers/seed_baseline.py
+```
+
+---
+
+## Testing
+
+**Unit tests** (no AWS needed; mocked clients):
+
+```bash
+python3 -m pytest tests
+```
+
+31 tests cover the scoring rules, denied calls, console sign-ins, root
+activity, tampering with the detector and its tables, and the attack simulator.
+
+**Live check.** Trigger an event in another region (this also tests
+forwarding), then watch the detector's log:
+
+```bash
+aws s3api create-bucket --bucket test-detect-euw1-<account-id> --region eu-west-1 \
+    --create-bucket-configuration LocationConstraint=eu-west-1
+aws s3api delete-bucket --bucket test-detect-euw1-<account-id> --region eu-west-1
+aws logs tail /aws/lambda/insider-threat-detector --since 5m --region us-east-1
+```
+
+Each log line shows the identity, API, score, reasons and whether it alerted.
+
+**Attack simulator.** [helpers/simulate_attack.py](helpers/simulate_attack.py)
+replays scripted attack scenarios as `dana-test` against a synthetic baseline
+(`fake_events.json`) and prints each score. We used it to test the pipeline
+end to end; the live demo uses the real commands shown above instead.
+
+---
+
+## Cost
+
+Designed to run at about **$0** on the free tier:
+
+- Management events only (no CloudTrail data events or Insights) and a single trail
+- `AES256` encryption instead of KMS keys ($1 a month each)
+- DynamoDB at 5 read / 5 write capacity units per table, inside the free tier; 7-day Lambda logs; 30-day CloudTrail log expiry
+- Dashboard on one free-tier `t3.micro` server
+- No VPC for the Lambdas (that would need a NAT gateway, about $33 a month)
+
+Extra cost only if you turn it on: `enable_alb_asg` (about $16 to $22 a month)
+and `protect_data` (point-in-time backups, a few cents for tables this size).
+
+Run `terraform destroy` (or `demo/cleanup.sh`) when you're done. This deletes the
+tables, logs and alert history, so baselines are re-seeded on the next deploy.
+
+---
+
+## Repository layout
+
+| Path | What it is |
+|---|---|
+| [demo/](demo/) | `quickstart.sh` and `cleanup.sh`: one-command deploy and removal in your own account |
+| [main/](main/) | All Terraform for the detector and dashboard |
+| [main/main.tf](main/main.tf) | Multi-region CloudTrail trail, its S3 log bucket, auto-seeding of baselines |
+| [main/eventbridge.tf](main/eventbridge.tf) | Event filter, detector Lambda, quarantine Lambda and their IAM roles |
+| [main/forwarding.tf](main/forwarding.tf) | Per-region forwarding rules to us-east-1 |
+| [main/watchdog.tf](main/watchdog.tf) | Watchdog rules that email directly on tampering |
+| [main/dynamodb.tf](main/dynamodb.tf) | Baseline and alerts tables, optional data protection |
+| [main/sns.tf](main/sns.tf) | Alert topic and email subscription |
+| [main/ec2.tf](main/ec2.tf), [main/cognito.tf](main/cognito.tf) | Dashboard server, its firewall rules, and login |
+| [main/high_availability.tf](main/high_availability.tf) | Optional load balancer and Auto Scaling group |
+| [main/dana.tf](main/dana.tf) | Optional `dana-test` demo user and decoy secret |
+| [lambda/handler.py](lambda/handler.py) | Scoring and alerting logic |
+| [lambda/quarantine.py](lambda/quarantine.py) | Block and Revoke actions used by the dashboard |
+| [ec2/](ec2/) | Dashboard app (`dashboard.py`) and its Dockerfile |
+| [helpers/](helpers/) | Baseline seeder, synthetic history generator, attack simulator, personas |
+| [tests/](tests/) | Unit tests |
+| [bootstrap/](bootstrap/) | S3 bucket for the team's shared Terraform state (run once) |
+| [Updates/](Updates/), [TASK-3.md](TASK-3.md), [TASK-4.md](TASK-4.md) | Build log, detection guide and design notes |
+
+---
+
+## Known limitations
+
+- **Shared roles share a baseline.** Assumed-role sessions resolve to the role,
+  so people sharing a role share one profile.
+- **Baselines are a snapshot.** They change only when the seed script runs again.
+- **The seed script learns from whatever happened.** Any activity in the last
+  90 days, including attacks or tests, counts as normal.
+- **New identities have no history**, so they score on the fixed rules only
+  (+40 unknown, plus any high-risk call) until they're seeded.
+- **Item-level table edits aren't detected.** Deleting single rows is a
+  CloudTrail data event, which we leave off for cost; backups cover recovery instead.
+- **Detection, then response.** The detector notices misuse after the call has
+  happened; blocking is a manual click on the dashboard, not automatic.
+
+---
+
+## Team and workflow
+
+Built by Ryan, Shadab, Rency and Yael.
+
+Work happens on task branches, which are merged into `test` through pull
+requests and then into `main`:
+
+```bash
+git checkout test && git pull
+git checkout -b task-your-change
+# ...make changes, commit...
+git push -u origin task-your-change    # then open a pull request into test
+```
+
+Never commit Terraform state, plan files, `.tfvars` or access keys; `.gitignore`
+already blocks them.
