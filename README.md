@@ -111,38 +111,14 @@ This removes everything, so nothing keeps running or costing money.
 
 ## How it works
 
-```mermaid
-flowchart LR
-    subgraph REGIONS["Every other enabled region"]
-        R1["API call"] --> CT1["CloudTrail"] --> FWD["Forwarding rule"]
-    end
-
-    subgraph HOME["us-east-1"]
-        R0["API call"] --> CT0["CloudTrail<br/>multi-region trail"] --> BUS["Default event bus"]
-        BUS --> RULE{"EventBridge rule<br/>risky calls only"}
-        RULE --> LAMBDA["Detector Lambda<br/>lambda/handler.py"]
-        BASE[("Baseline table<br/>what's normal")] --> LAMBDA
-        LAMBDA --> SCORE{"Score ≥ 75?"}
-        SCORE -- yes --> SNS["Email alert<br/>reasons + MITRE tactic"]
-        SCORE -- yes --> ALERTS[("Alerts table")]
-        ALERTS --> DASH["Dashboard<br/>EC2 + Cognito login"]
-        DASH -- Block / Revoke --> Q["Quarantine Lambda"]
-        WATCH["Watchdog rules"] -- tampering --> SNS
-    end
-
-    FWD --> BUS
-```
+![AWS IAM Insider Threat Detection Architecture](images/architecture.png)
 
 1. **CloudTrail** records every management API call in every region into one S3 bucket.
-2. **EventBridge** passes on only the calls worth scoring:
-   - mutating calls, a short list of sensitive reads (secrets, decoy object reads),
-     denied calls (`AccessDenied`, `UnauthorizedOperation`) and console sign-ins;
-   - made by a person or role, not by an AWS service acting on its own.
-3. **The detector Lambda** looks up the identity's baseline, adds up a risk
-   score, and decides whether to alert. If the baseline lookup fails, it
-   alerts anyway (it *fails closed*).
-4. **Alerts** go out by email through SNS, explaining in plain language why
-   they fired, and are saved to the alerts table for the dashboard.
+2. **EventBridge** (plus small forwarding rules in other regions) passes on only the calls worth scoring: mutating calls, sensitive reads, denied calls, and console sign-ins made by a person or role.
+3. **The detector Lambda** looks up the identity’s baseline, scores the event, and decides whether to alert. If the baseline lookup fails, it alerts anyway (it *fails closed*).
+4. **Alerts** go out by email through SNS (with the score and reasons) and are saved to the alerts table.
+5. **The dashboard** (EC2 + Cognito, optional ALB) shows the alerts and can call the **Quarantine Lambda** to Block or Revoke a user with one click.
+6. **Watchdog rules** email the alert topic directly if anyone tampers with the detector, its rules, or its tables.
 
 **Multi-region.** An EventBridge rule can't invoke a Lambda in another region,
 but it can forward events to another region's event bus. So every enabled
