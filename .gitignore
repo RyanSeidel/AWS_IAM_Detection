@@ -1,23 +1,18 @@
-### AL ###
-#Template for AL projects for Dynamics 365 Business Central
-#launch.json folder
-.vscode/
-#Cache folder
-.alcache/
-#Symbols folder
-.alpackages/
-#Snapshots folder
-.snapshots/
-#Testing Output folder
-.output/
-#Extension App-file
-*.app
-#Rapid Application Development File
-rad.json
-#Translation Base-file
-*.g.xlf
-#License-files
-*.bclicense
-*.flf
-#Test results file
-TestResults.xml
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+*.tfvars
+!*.tfvars.example
+*.tfplan
+crash.log
+*.zip
+*.json.gz
+item*.json
+backend.hcl
+.DS_Store
+__pycache__/
+*.pyc
+
+# Local state override written by demo/quickstart.sh
+main/backend_override.tf

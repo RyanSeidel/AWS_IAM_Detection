@@ -1,0 +1,15 @@
+{
+  "identity": "rency.dev",
+  "regions": ["us-east-1"],
+  "hours_utc": [23, 0, 1, 2, 3, 4, 5, 6],
+  "ips": ["172.182.200.129"],
+  "apis": [
+    "signin:ConsoleLogin",
+    "s3:CreateBucket",
+    "s3:DeleteBucket",
+    "lambda:UpdateFunctionCode",
+    "logs:CreateLogStream"
+  ],
+  "events_per_day": [5, 20],
+  "weekdays_only": true
+}

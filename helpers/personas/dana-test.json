@@ -1,0 +1,15 @@
+{
+  "identity": "dana-test",
+  "regions": ["us-east-1"],
+  "hours_utc": [19, 20, 21],
+  "ips": ["203.0.113.10"],
+  "apis": [
+    "s3:CreateBucket",
+    "s3:PutBucketTagging",
+    "s3:DeleteBucket",
+    "ssm:PutParameter",
+    "iam:ListAccessKeys"
+  ],
+  "events_per_day": [3, 8],
+  "weekdays_only": true
+}

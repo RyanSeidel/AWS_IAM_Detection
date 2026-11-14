@@ -1,0 +1,780 @@
+# Build Log — Insider Threat Detection
+
+**Updated:** September 18, 2026
+**Author:** Ryan
+**AWS Account:** 021158484652 (us-east-1)
+
+---
+
+## What we're building
+
+    Someone makes an API call
+        -> CloudTrail records it
+        -> EventBridge filters for risky ones
+        -> Lambda scores it against a DynamoDB baseline
+        -> SNS emails an explained alert
+
+The point is to detect activity that is **unusual for that specific identity**,
+not activity that matches a known-bad list. A stolen credential and a malicious
+insider look identical in logs, so we baseline per-identity behaviour instead.
+
+## Status
+
+| Phase | What | Done |
+|---|---|---|
+| 1 | Terraform state backend (S3) | Yes |
+| 2 | CloudTrail + log bucket | Yes |
+| 3 | DynamoDB baseline table + seed data | Yes |
+| 4 | EventBridge rule + Lambda | Yes |
+| 6 | SNS email alerting | Yes |
+| **5** | **Scoring logic + explanations** | **Not started** |
+| 7 | MITRE mapping, attack demo, README | Not started |
+
+**Phase 5 is the actual project.** Right now the Lambda alerts on every
+mutating call and never reads the baseline table. It is a louder version of
+the tools we said we'd improve on. The scoring is what makes it ours.
+
+---
+
+## Part 1 — Local setup
+
+Each person does this once, on their own machine. Everyone needs their own IAM
+user and their own access key. Do not share credentials: CloudTrail attributes
+every event to an identity, and sharing collapses the baselines that the whole
+project depends on.
+
+### Install the tools (Windows, PowerShell — not as Administrator)
+
+    winget install HashiCorp.Terraform
+    winget install Amazon.AWSCLI
+
+Close PowerShell and reopen it so PATH refreshes, then check:
+
+    terraform -version     # we are on 1.16
+    aws --version
+
+### Get an access key
+
+1. IAM -> Users -> your user -> Security credentials
+2. Create access key -> **Command Line Interface (CLI)**
+3. The secret shows once only. Do not paste it anywhere.
+
+### Configure and verify
+
+    aws configure
+    # key id, secret, us-east-1, json
+
+    aws sts get-caller-identity
+
+The ARN must end in `:user/your-name`. **If it says `:root`, stop** — delete
+that key and make an IAM user instead. Root cannot be restricted by any policy
+and can close the account.
+
+### Credential rules
+
+- Never create a root access key
+- Never share keys between teammates
+- Never commit a key, and never paste one into chat or Discord
+- Delete your key at the end of the semester
+- Enable MFA on your IAM user
+
+---
+
+## Part 2 — Phase 1: Terraform state backend
+
+Creates the S3 bucket that holds shared Terraform state, so all four of us
+work against one source of truth.
+
+Chicken-and-egg: this module runs with **local** state, because the remote
+backend can't exist before it does. Run it once and leave it alone.
+
+    mkdir bootstrap -Force | Out-Null
+
+`bootstrap/main.tf`:
+
+```hcl
+terraform {
+  required_version = ">= 1.10"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+data "aws_caller_identity" "current" {}
+
+locals {
+  bucket = "insider-threat-tfstate-${data.aws_caller_identity.current.account_id}"
+}
+
+resource "aws_s3_bucket" "state" {
+  bucket = local.bucket
+}
+
+resource "aws_s3_bucket_versioning" "state" {
+  bucket = aws_s3_bucket.state.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "state" {
+  bucket = aws_s3_bucket.state.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "state" {
+  bucket                  = aws_s3_bucket.state.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+output "state_bucket" {
+  value = aws_s3_bucket.state.id
+}
+```
+
+Run:
+
+    cd bootstrap
+    terraform init
+    terraform apply
+
+Result: `state_bucket = "insider-threat-tfstate-021158484652"`
+
+`AES256` is SSE-S3 and free. We deliberately avoided `aws:kms`, because a
+customer managed KMS key costs $1/month.
+
+---
+
+## Part 3 — Phase 2: CloudTrail
+
+The sensor. Without this, nothing downstream has data.
+
+`main/main.tf` — note the `backend "s3"` block pointing at the bucket from
+Phase 1:
+
+```hcl
+terraform {
+  required_version = ">= 1.10"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+  backend "s3" {
+    bucket       = "insider-threat-tfstate-021158484652"
+    key          = "insider-threat/main.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+
+  default_tags {
+    tags = {
+      Project   = "insider-threat"
+      ManagedBy = "terraform"
+    }
+  }
+}
+
+data "aws_caller_identity" "current" {}
+
+locals {
+  trail_name  = "insider-threat-trail"
+  bucket_name = "insider-threat-cloudtrail-${data.aws_caller_identity.current.account_id}"
+  trail_arn   = "arn:aws:cloudtrail:us-east-1:${data.aws_caller_identity.current.account_id}:trail/insider-threat-trail"
+}
+
+resource "aws_s3_bucket" "trail" {
+  bucket        = local.bucket_name
+  force_destroy = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "trail" {
+  bucket = aws_s3_bucket.trail.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "trail" {
+  bucket                  = aws_s3_bucket.trail.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "trail" {
+  bucket = aws_s3_bucket.trail.id
+  rule {
+    id     = "expire-logs"
+    status = "Enabled"
+    filter {}
+    expiration {
+      days = 30
+    }
+  }
+}
+
+data "aws_iam_policy_document" "trail" {
+  statement {
+    sid    = "AWSCloudTrailAclCheck"
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+    actions   = ["s3:GetBucketAcl"]
+    resources = [aws_s3_bucket.trail.arn]
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceArn"
+      values   = [local.trail_arn]
+    }
+  }
+
+  statement {
+    sid    = "AWSCloudTrailWrite"
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.trail.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"]
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-acl"
+      values   = ["bucket-owner-full-control"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceArn"
+      values   = [local.trail_arn]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "trail" {
+  bucket     = aws_s3_bucket.trail.id
+  policy     = data.aws_iam_policy_document.trail.json
+  depends_on = [aws_s3_bucket_public_access_block.trail]
+}
+
+resource "aws_cloudtrail" "main" {
+  name                          = local.trail_name
+  s3_bucket_name                = aws_s3_bucket.trail.id
+  include_global_service_events = true
+  is_multi_region_trail         = false
+  enable_log_file_validation    = true
+  enable_logging                = true
+
+  depends_on = [aws_s3_bucket_policy.trail]
+}
+
+output "trail_bucket" {
+  value = aws_s3_bucket.trail.id
+}
+```
+
+Run:
+
+    cd main
+    terraform init
+    terraform apply
+
+### Why this is free
+
+CloudTrail gives you the first copy of **management events** per region at no
+charge. We define no event selectors, which means management events only.
+
+**Never enable data events** (S3 object access, Lambda invokes). They bill at
+$0.10 per 100,000 with no free copy and are the usual cause of a surprise
+CloudTrail bill. Also never enable Insights, and never create a second trail
+in the same region — the duplicate copy is billed.
+
+`include_global_service_events = true` matters: IAM and STS only emit events in
+us-east-1, and our whole threat model is identity behaviour.
+
+### Verify
+
+Wait ~15 minutes after applying, then:
+
+    aws s3 ls s3://insider-threat-cloudtrail-021158484652/AWSLogs/ --recursive
+
+`.json.gz` objects mean it's working.
+
+---
+
+## Part 4 — Phase 3: DynamoDB baseline
+
+Stores what "normal" looks like for each identity.
+
+**Schema:** partition key `identity` (the IAM user ARN), sort key `facet`
+(which behavioural dimension). One identity gets several rows:
+
+| identity | facet | values |
+|---|---|---|
+| `arn:...:user/admin.me` | `apis` | list of API calls they normally make |
+| `arn:...:user/admin.me` | `regions` | `["us-east-1"]` |
+| `arn:...:user/admin.me` | `hours` | UTC hours they normally work |
+| `arn:...:user/admin.me` | `source_ips` | IPs they normally come from |
+
+Rows rather than one big item, so the Lambda fetches only the facets it needs
+and we can add a fifth signal later without a schema migration.
+
+`main/dynamodb.tf`:
+
+```hcl
+resource "aws_dynamodb_table" "baseline" {
+  name           = "insider-threat-baseline"
+  billing_mode   = "PROVISIONED"
+  read_capacity  = 1
+  write_capacity = 1
+
+  hash_key  = "identity"
+  range_key = "facet"
+
+  attribute {
+    name = "identity"
+    type = "S"
+  }
+
+  attribute {
+    name = "facet"
+    type = "S"
+  }
+}
+
+output "baseline_table" {
+  value = aws_dynamodb_table.baseline.name
+}
+```
+
+    terraform apply
+
+1 read / 1 write capacity unit is well inside the 25/25 always-free allowance.
+
+### Seeding the baseline
+
+An empty baseline means everything looks unusual. Seed it.
+
+**Do not use inline JSON on the AWS CLI under PowerShell** — it mangles the
+escaping. **And do not use `Set-Content -Encoding UTF8`** — Windows PowerShell
+writes a byte-order mark that breaks the JSON parser. Use `WriteAllText`:
+
+```powershell
+cd C:\Users\rgsei\Downloads\AWS_IAM_Detection\main
+
+$enc = New-Object System.Text.UTF8Encoding($false)
+$p = $PWD.Path
+
+[IO.File]::WriteAllText("$p\item1.json", '{"identity":{"S":"arn:aws:iam::021158484652:user/admin.me"},"facet":{"S":"apis"},"values":{"SS":["s3.amazonaws.com:CreateBucket","s3.amazonaws.com:PutObject","cloudtrail.amazonaws.com:CreateTrail","dynamodb.amazonaws.com:CreateTable"]}}', $enc)
+
+[IO.File]::WriteAllText("$p\item2.json", '{"identity":{"S":"arn:aws:iam::021158484652:user/admin.me"},"facet":{"S":"regions"},"values":{"SS":["us-east-1"]}}', $enc)
+
+[IO.File]::WriteAllText("$p\item3.json", '{"identity":{"S":"arn:aws:iam::021158484652:user/admin.me"},"facet":{"S":"hours"},"values":{"SS":["13","14","15","16","17","18","19","20","21","22","23"]}}', $enc)
+
+[IO.File]::WriteAllText("$p\item4.json", '{"identity":{"S":"arn:aws:iam::021158484652:user/admin.me"},"facet":{"S":"source_ips"},"values":{"SS":["35.147.145.30"]}}', $enc)
+
+aws dynamodb put-item --table-name insider-threat-baseline --item file://item1.json
+aws dynamodb put-item --table-name insider-threat-baseline --item file://item2.json
+aws dynamodb put-item --table-name insider-threat-baseline --item file://item3.json
+aws dynamodb put-item --table-name insider-threat-baseline --item file://item4.json
+
+aws dynamodb scan --table-name insider-threat-baseline --query "Count"
+
+Remove-Item item*.json
+```
+
+Should print `4`.
+
+Hours are **UTC**, matching CloudTrail's `eventTime`. 13–23 UTC is roughly
+8am–6pm Central.
+
+Repeat with `rency.dev`, `shadab.dev`, `yael.dev` when we want their baselines.
+An identity with no baseline at all is itself a useful signal.
+
+---
+
+## Part 5 — Phase 4: EventBridge + Lambda
+
+### What we learned from a real CloudTrail record
+
+Before writing the Lambda we pulled a log file and looked at it. Four things
+that shaped the code:
+
+1. **`userIdentity.type` varies** — `IAMUser`, `AssumedRole`, `AWSService`.
+   The `AWSService` records have no `arn` and no `accessKeyId`, so naive field
+   access crashes. For `AssumedRole` the real principal is at
+   `sessionContext.sessionIssuer.arn`, not `arn`.
+2. **`sourceIPAddress` isn't always an IP** — service calls put a hostname
+   there, like `resource-explorer-2.amazonaws.com`.
+3. **`readOnly: false`** is the best volume filter. We only care about
+   mutating calls.
+4. **`invokedBy` exists on service-initiated calls** and is absent on human
+   ones. Cleanest way to drop AWS's own background noise.
+
+### `lambda/handler.py` (stub version)
+
+```python
+import json
+
+def resolve_identity(ui):
+    t = ui.get("type")
+    if t == "IAMUser":
+        return ui.get("arn")
+    if t == "AssumedRole":
+        return ui.get("sessionContext", {}).get("sessionIssuer", {}).get("arn")
+    return None
+
+def handler(event, context):
+    d = event.get("detail", {})
+    ui = d.get("userIdentity", {})
+    summary = {
+        "identity": resolve_identity(ui),
+        "identity_type": ui.get("type"),
+        "access_key": ui.get("accessKeyId"),
+        "api": "{}:{}".format(d.get("eventSource"), d.get("eventName")),
+        "region": d.get("awsRegion"),
+        "time": d.get("eventTime"),
+        "source_ip": d.get("sourceIPAddress"),
+        "read_only": d.get("readOnly"),
+    }
+    print(json.dumps(summary))
+    return {"ok": True}
+```
+
+### `main/eventbridge.tf`
+
+```hcl
+data "archive_file" "detector" {
+  type        = "zip"
+  source_file = "${path.module}/../lambda/handler.py"
+  output_path = "${path.module}/detector.zip"
+}
+
+resource "aws_iam_role" "detector" {
+  name = "insider-threat-detector"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_cloudwatch_log_group" "detector" {
+  name              = "/aws/lambda/insider-threat-detector"
+  retention_in_days = 7
+}
+
+resource "aws_iam_role_policy" "detector" {
+  role = aws_iam_role.detector.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "${aws_cloudwatch_log_group.detector.arn}:*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:Query"]
+        Resource = aws_dynamodb_table.baseline.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["sns:Publish"]
+        Resource = aws_sns_topic.alerts.arn
+      }
+    ]
+  })
+}
+
+resource "aws_lambda_function" "detector" {
+  function_name    = "insider-threat-detector"
+  role             = aws_iam_role.detector.arn
+  handler          = "handler.handler"
+  runtime          = "python3.13"
+  filename         = data.archive_file.detector.output_path
+  source_code_hash = data.archive_file.detector.output_base64sha256
+  timeout          = 10
+
+  environment {
+    variables = {
+      BASELINE_TABLE = aws_dynamodb_table.baseline.name
+      ALERT_TOPIC    = aws_sns_topic.alerts.arn
+    }
+  }
+
+  depends_on = [aws_cloudwatch_log_group.detector]
+}
+
+resource "aws_cloudwatch_event_rule" "risky" {
+  name = "insider-threat-risky-calls"
+
+  event_pattern = jsonencode({
+    "detail-type" = ["AWS API Call via CloudTrail"]
+    detail = {
+      readOnly    = [false]
+      eventSource = [{ "anything-but" = ["logs.amazonaws.com"] }]
+      userIdentity = {
+        invokedBy = [{ exists = false }]
+        type      = ["IAMUser", "AssumedRole"]
+      }
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "detector" {
+  rule = aws_cloudwatch_event_rule.risky.name
+  arn  = aws_lambda_function.detector.arn
+}
+
+resource "aws_lambda_permission" "events" {
+  statement_id  = "AllowEventBridge"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.detector.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.risky.arn
+}
+```
+
+    terraform init      # archive provider is new
+    terraform apply
+
+### The feedback loop (important)
+
+Our first version had a bug worth knowing about. The Lambda writes to
+CloudWatch Logs. `CreateLogStream` is a mutating call. EventBridge matched it
+and invoked the Lambda again — which wrote another log.
+
+The `anything-but: logs.amazonaws.com` clause fixes it. Without it, a runaway
+Lambda loop is one of the only ways this project could actually cost money.
+
+### Test
+
+```powershell
+aws s3api create-bucket --bucket test-detect-021158484652
+aws s3api delete-bucket --bucket test-detect-021158484652
+aws logs tail /aws/lambda/insider-threat-detector --since 2m --filter-pattern "identity"
+```
+
+Two lines, both `admin.me`, and **no** `logs.amazonaws.com:CreateLogStream`.
+Measured latency from API call to Lambda: **about 9 seconds.**
+
+---
+
+## Part 6 — Phase 6: SNS alerting
+
+`main/sns.tf`:
+
+```hcl
+resource "aws_sns_topic" "alerts" {
+  name = "insider-threat-alerts"
+}
+
+resource "aws_sns_topic_subscription" "email" {
+  topic_arn = aws_sns_topic.alerts.arn
+  protocol  = "email"
+  endpoint  = var.alert_email
+}
+
+variable "alert_email" {
+  type = string
+}
+
+output "alert_topic" {
+  value = aws_sns_topic.alerts.arn
+}
+```
+
+Updated `lambda/handler.py`:
+
+```python
+import json, os, boto3
+
+sns = boto3.client("sns")
+TOPIC = os.environ["ALERT_TOPIC"]
+
+def resolve_identity(ui):
+    t = ui.get("type")
+    if t == "IAMUser":
+        return ui.get("arn")
+    if t == "AssumedRole":
+        return ui.get("sessionContext", {}).get("sessionIssuer", {}).get("arn")
+    return None
+
+def handler(event, context):
+    d = event.get("detail", {})
+    ui = d.get("userIdentity", {})
+    identity = resolve_identity(ui) or "unknown"
+    api = "{}:{}".format(d.get("eventSource"), d.get("eventName"))
+
+    body = (
+        "Mutating API call detected\n\n"
+        "Identity:   {}\n"
+        "API:        {}\n"
+        "Region:     {}\n"
+        "Time (UTC): {}\n"
+        "Source IP:  {}\n"
+        "Access key: {}\n"
+    ).format(identity, api, d.get("awsRegion"), d.get("eventTime"),
+             d.get("sourceIPAddress"), ui.get("accessKeyId"))
+
+    sns.publish(TopicArn=TOPIC, Subject="[insider-threat] {}".format(api)[:100], Message=body)
+    print(json.dumps({"identity": identity, "api": api, "alerted": True}))
+    return {"ok": True}
+```
+
+Apply with the email as a variable:
+
+    terraform apply -var="alert_email=rgseidel@gmail.com"
+
+**AWS sends a confirmation email that you must click by hand.** Terraform
+can't do this step. Until confirmed, the subscription shows
+`PendingConfirmation` and nothing is delivered.
+
+Check status:
+
+    aws sns list-subscriptions-by-topic --topic-arn arn:aws:sns:us-east-1:021158484652:insider-threat-alerts --query "Subscriptions[].SubscriptionArn"
+
+### Known problem: it's very noisy
+
+With no scoring, every mutating call emails you — including our own
+`terraform apply`, which fired about a dozen alerts for its own work
+(`CreateTopic`, `Subscribe`, four `SetTopicAttributes`, `PutRolePolicy`,
+`UpdateFunctionCode`).
+
+**This is good pitch material.** It's a live demonstration of the
+alert-fatigue problem our proposal describes, produced on ourselves within a
+minute of enabling alerting. Use it as the "before" slide.
+
+---
+
+## Still to do
+
+### Phase 5 — scoring (this is the actual project)
+
+The Lambda currently ignores the baseline table entirely. It needs to:
+
+- Query DynamoDB for the identity's four facets
+- Compare the event against each: unseen API, new region, off-hours,
+  new source IP, no baseline at all
+- Assign weights and sum into a composite score
+- Only alert above a threshold, so two weak signals fire but one doesn't
+
+Proposed weights: unseen API 3, new region 3, off-hours 2, new IP 2,
+unknown identity 4. Threshold 5.
+
+### Phase 7 — demo and writeup
+
+- Plain-language explanations ("unusual because this user has no history of
+  this API, at an unusual hour, from a new IP")
+- MITRE ATT&CK technique ID on each detection
+- Attack simulation runbook for the live demo
+- Threshold tuning against normal team activity
+- README with architecture diagram
+- Verify `terraform destroy` rebuilds cleanly
+
+---
+
+## Useful commands
+
+Check spend, per service, month to date:
+
+    aws ce get-cost-and-usage --time-period Start=2026-09-01,End=2026-09-19 --granularity MONTHLY --metrics UnblendedCost --group-by Type=DIMENSION,Key=SERVICE
+
+What's deployed:
+
+    terraform state list
+
+Watch the Lambda live:
+
+    aws logs tail /aws/lambda/insider-threat-detector --follow
+
+Recent detections only:
+
+    aws logs tail /aws/lambda/insider-threat-detector --since 2m --filter-pattern "identity"
+
+Trigger a test event:
+
+    aws s3api create-bucket --bucket test-detect-021158484652
+    aws s3api delete-bucket --bucket test-detect-021158484652
+
+Security audit of all our IAM users (key age, MFA, unused credentials):
+
+    aws iam generate-credential-report
+    aws iam get-credential-report --query Content --output text
+
+---
+
+## Gotchas we hit
+
+**PowerShell mangles inline JSON on the AWS CLI.** Backslash-escaped quotes
+get eaten before the CLI sees them. Write a JSON file and use `file://`.
+
+**`Set-Content -Encoding UTF8` writes a BOM.** Shows up as `ï»¿` and breaks
+JSON parsing. Use `[IO.File]::WriteAllText($path, $text, $enc)` with
+`$enc = New-Object System.Text.UTF8Encoding($false)`.
+
+**Terraform's `${...}` gets expanded by PowerShell** inside double-quoted
+here-strings. Escape with a backtick: `` `${path.module} ``.
+
+**`aws_iam_role` vs `aws_iam_role_policy`.** The first is the *trust* policy
+(who can assume the role), the second is the *permissions* policy (what it can
+do). `sns:Publish` belongs in the second. Easy to mix up since both hold JSON.
+
+**Lambda env vars nest twice:** `environment { variables = { ... } }`.
+
+**`--since 5m` can include old runs** and make it look like a fix didn't work.
+Narrow the window when verifying a change.
+
+---
+
+## Cost status
+
+Checked September 18 — **everything at zero.** The only line item was a KMS
+key at $1/month, which turned out to be created by IAM Identity Center (which
+we don't use and removed). Cost Explorer now shows it credited back.
+
+### Rules that keep it free
+
+- Management events only. Never data events, never Insights.
+- One trail per region.
+- `AES256` (SSE-S3) everywhere. Never `aws:kms`.
+- No VPC for the Lambda — that implies a NAT Gateway at ~$33/month.
+- Always set `retention_in_days` on CloudWatch log groups.
+- DynamoDB stays at 1 RCU / 1 WCU.
+- Never enable GuardDuty, Config, Security Hub, or Macie.
+
+### Free tier limits we're inside
+
+Lambda 1M requests/month. SNS 1,000 emails/month — worth watching, since
+unscored alerting emails on every mutating call. DynamoDB 25 GB and 25/25
+capacity. EventBridge doesn't charge for AWS service events.
