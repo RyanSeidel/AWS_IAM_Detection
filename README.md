@@ -1,5 +1,7 @@
 # AWS IAM Insider Threat Detection
 
+**Try it yourself (15 minutes, Quick Guide):** [InsiderWatch: Try It in Your Own AWS Account](InsiderWatch_Try_It_Yourself.md)
+
 **InsiderWatch** watches every AWS API call in an account and alerts when an
 identity does something **unusual for that specific identity**, not just
 something on a known-bad list. Built with Terraform and Python for our Cloud
